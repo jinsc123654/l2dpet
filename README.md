@@ -168,7 +168,7 @@ macOS 尚未完成实机验证，欢迎反馈构建及运行问题。
 | Windows | `%USERPROFILE%\.local\share\l2dpet\models\` |
 | Linux / macOS | `~/.local/share/l2dpet/models/` |
 
-例如：`models/MyPet/MyPet.model3.json`。可以在设置面板中选择模型。Windows 的 zip 导入目前存在限制，建议直接复制完整模型文件夹。
+例如：`models/MyPet/MyPet.model3.json`。可以在设置面板中选择模型，也可以导入 ZIP 或目录。Windows 的 ZIP 导入使用系统自带的 `tar.exe`（Windows 10 1803 及以上）；首次导入会自动创建模型库目录。
 
 请使用你拥有授权的模型，并遵守模型作者的使用与分发要求。
 

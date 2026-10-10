@@ -167,7 +167,7 @@ Use a separate folder for each model, preserving relative paths for `.model3.jso
 | Windows | `%USERPROFILE%\.local\share\l2dpet\models\` |
 | Linux / macOS | `~/.local/share/l2dpet/models/` |
 
-For example: `models/MyPet/MyPet.model3.json`. Select models in the settings panel. Windows zip import currently has limitations; copy the complete model folder directly instead.
+For example: `models/MyPet/MyPet.model3.json`. Select models in the settings panel, or import a ZIP or directory. Windows ZIP import uses the built-in `tar.exe` (Windows 10 1803 or later). The model library directory is created automatically on the first import.
 
 Use models you are authorized to use, and follow their authors' usage and distribution requirements.
 

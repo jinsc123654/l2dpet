@@ -155,7 +155,13 @@ bool ImportModelInto(const std::string& srcPath, const std::string& root, std::s
     {
         target = root + "/" + base + "-" + std::to_string(k);
     }
-    plat::CreateDir(root);
+    // A fresh user profile may not have .local/share/l2dpet yet.
+    // Create the entire model-library path before creating its import workspace.
+    if (!plat::CreateDir(root, true))
+    {
+        *err = "无法创建模型库目录：" + root + "（请检查目录权限或同名文件）";
+        return false;
+    }
 
     std::string modelDir;
     std::string m3Name;   // 模型自己声称的名字（<名>.model3.json 的 <名>，通常等于 <名>.moc3）
@@ -167,7 +173,7 @@ bool ImportModelInto(const std::string& srcPath, const std::string& root, std::s
         RemoveDirTree(tmpDir);
         if (!plat::CreateDir(tmpDir))
         {
-            *err = "临时目录建不了";
+            *err = "无法创建导入临时目录：" + tmpDir + "（请检查目录权限或同名文件）";
             return false;
         }
         // 解压走独立可执行（参数数组直传，不经 shell）

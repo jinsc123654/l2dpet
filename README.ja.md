@@ -167,7 +167,7 @@ macOS の実機検証はまだ完了していません。ビルドや動作の�
 | Windows | `%USERPROFILE%\.local\share\l2dpet\models\` |
 | Linux / macOS | `~/.local/share/l2dpet/models/` |
 
-例：`models/MyPet/MyPet.model3.json`。設定パネルでモデルを選択できます。Windows の zip インポートには現在制限があるため、モデルフォルダー全体を直接コピーする方法を推奨します。
+例：`models/MyPet/MyPet.model3.json`。設定パネルでモデルを選択したり、ZIP またはフォルダーをインポートしたりできます。Windows の ZIP インポートは標準の `tar.exe`（Windows 10 1803 以降）を使用します。初回インポート時にモデルライブラリのディレクトリを自動作成します。
 
 使用許諾を得たモデルを使い、作者が定める使用・配布条件を守ってください。
 
