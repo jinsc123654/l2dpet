@@ -57,6 +57,10 @@ LlmSettings LlmLoadSettings();
 /** 本构建是否支持 https（编入了 libcurl）。 */
 bool LlmHasHttps();
 
+/** 通过供应商原生联网搜索工具让模型查询天气（当前支持官方 DeepSeek）。 */
+bool LlmWeatherSearch(const LlmSettings& cfg, const std::string& location,
+                      std::string* response, std::string* err);
+
 /** 让进行中的/之后的 LlmChat 立即失败返回（退出时用：别让一个 60s 的请求把关窗拖住）。进程级。 */
 void LlmCancelAll();
 

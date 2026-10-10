@@ -360,12 +360,13 @@ def throttle(seq, now, last_question_at, allow_questions=True):
         if "options" in st:
             if not allow_questions or asked or now - last_question_at < QUESTION_COOLDOWN or "speak" not in st:
                 st.pop("options")
+                st.pop("speak", None)  # 连问句一起去掉，避免留下无法回答的问题
                 cut.append("提问")
             else:
                 asked = True
         if "speak" in st:
             speaks += 1
-            if speaks > MAX_SPEAK_PER_SEG and "options" not in st:
+            if (speaks > MAX_SPEAK_PER_SEG or asked) and "options" not in st:
                 st.pop("speak")
                 cut.append("台词")
     exprs = 0

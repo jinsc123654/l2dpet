@@ -317,6 +317,71 @@ std::string MoodStateZh(const std::string& s)
     return "醒着";
 }
 
+// 候选题用编号关联选项；兼容旧模型只输出原题（忽略标点与口癖前缀）。
+std::string QuestionTextKey(const std::string& text)
+{
+    std::string out;
+    const char* punctuation[] = {"，", "。", "？", "！", "…", "、", "“", "”", "：", "　"};
+    for (size_t i = 0; i < text.size();)
+    {
+        const unsigned char c = (unsigned char)text[i];
+        const size_t n = c < 0x80 ? 1 : ((c & 0xe0) == 0xc0 ? 2 : ((c & 0xf0) == 0xe0 ? 3 : 4));
+        if (i + n > text.size()) break;
+        bool drop = n == 1 && (c <= ' ' || std::strchr(",.!?:~", c) != NULL);
+        for (const char* mark : punctuation) drop = drop || text.compare(i, n, mark) == 0;
+        if (!drop) out.append(text, i, n);
+        i += n;
+    }
+    return out;
+}
+
+void RestoreQuestionOptions(jsonlite::Value* seq, const std::vector<const PetQuestions::Item*>& candidates)
+{
+    jsonlite::Value* steps = ObjGetMut(seq, "steps");
+    if (steps == NULL || !steps->isArr()) return;
+    for (jsonlite::Value& step : steps->arr)
+    {
+        const jsonlite::Value id = step.get("question_id");
+        ObjDel(&step, "question_id"); // 仅供 agent 使用，不发给播放器
+        const std::string speech = GetStr(&step, "speak");
+        if (speech.empty()) continue;
+        const PetQuestions::Item* selected = NULL;
+        if (id.isNum() && id.num >= 1 && id.num <= candidates.size() && std::floor(id.num) == id.num)
+            selected = candidates[(size_t)id.num - 1];
+        else
+        {
+            const std::string key = QuestionTextKey(speech);
+            for (const PetQuestions::Item* item : candidates)
+            {
+                const std::string q = QuestionTextKey(item->q);
+                if (!q.empty() && key.find(q) != std::string::npos)
+                {
+                    if (selected != NULL) { selected = NULL; break; } // 多题混在一句里不能猜选项
+                    selected = item;
+                }
+            }
+        }
+        const jsonlite::Value& opts = step.get("options");
+        size_t valid = 0;
+        for (size_t i = 0; opts.isArr() && i < opts.arr.size(); ++i)
+        {
+            const jsonlite::Value& o = opts.arr[i];
+            if (!(o.isObj() ? std::string(o.get("label").strOr("")) : std::string(o.strOr(""))).empty()) ++valid;
+        }
+        if (selected == NULL || valid >= 2) continue; // 保留模型写好的选项与 do 动作
+        jsonlite::Value restored;
+        restored.setType(jsonlite::Value::ARR);
+        for (const std::string& label : selected->options)
+        {
+            jsonlite::Value value;
+            value.setType(jsonlite::Value::STR);
+            value.str = label;
+            restored.arr.push_back(value);
+        }
+        ObjSet(&step, "options", restored);
+    }
+}
+
 // 节制（定义在后文第二个匿名命名空间；Run 在前面用，先声明）
 bool ThrottleSeq(jsonlite::Value* seq, double now, double lastQuestionAt, bool allowQuestions, std::string* cutWhat);
 void ClampRespond(jsonlite::Value* seq);
@@ -340,7 +405,7 @@ const char* kSystemPromptHead =
 const char* kSystemPromptTail =
     "\n规则：\n"
     "- 只输出一个 JSON：{\"cmd\":\"sequence\",\"model\":\"{model}\",\"mode\":\"queue\",\"dur\":<秒>,\"steps\":[…]}，不要其它文字。\n"
-    "- step 可用的键：at（秒）、speak（中文台词）、emotion（情绪，见下）、action（act:…）、expression（exp:… 或 null）、motion（mtn:…）、\n"
+    "- step 可用的键：at（秒）、speak（中文台词）、options（可点击选项数组）、question_id（候选题号，数字）、emotion（情绪，见下）、action（act:…）、expression（exp:… 或 null）、motion（mtn:…）、\n"
     "  look（viewer/left/right/up/down）、pose（{\"set\":[pose:…],\"hands\":[hand:…],\"joints\":{joint:…:值},\"parts\":{part:…:值},\"t\":秒}）。\n"
     "- 只能引用能力表里出现的 fv；关节值必须在 range 内；parts 的值是相对自然姿态的增量。\n"
     "- skeleton 为空时不要写 pose.set / joints，用表情、头部、视线、说话和预置动作来表达。\n"
@@ -357,7 +422,7 @@ const char* kSystemPromptTail =
     "  随口闲聊…… 别总问\"在干什么/在忙吗\"这类笼统的；闲时段的用户消息里会给你**候选题**（来自你的问题库），\n"
     "  优先从中挑一个最贴合气氛的；问过的（含换种说法）不要再问。\n"
     "- 别的互动（右侧菜单里主人可以点）：主人点\"讲个笑话\"你会收到 joke 事件、点\"猜拳\"会收到 game 事件、\n"
-    "  点\"聊天气\"会收到 weather 事件——这三样的**具体台词与判定由桌宠本地完成**（会念 life.joke / life.rps.* 那些句子），\n"
+    "  点\"聊天气\"时根据提供的联网查询结果回应。笑话和猜拳的**具体台词与判定由桌宠本地完成**（life.joke / life.rps.*），\n"
     "  你收到事件后只需要**接着玩**：顺着刚才的事说一句（别重复它已经说过的设定），也可以顺势调侃两句；\n"
     "  你自己在闲时也可以偶尔讲个冷笑话（用 speak 直接说，1 句就够）或邀请主人玩一局猜拳。\n"
     "- 你会实时收到用户和角色的身体交互事件：click（点击某区域，n=连点次数；手=牵手、脸=捏脸、其余=戳）、\n"
@@ -509,6 +574,7 @@ void PetAgent::Run()
         if (tries == 39) Log("等了 8 秒还没读到配置（桌宠还在加载模型？）——先用默认语言，收到 config 事件会自动对齐");
         NapMs(200);
     }
+    _weather.Load(plat::HomeDir() + "/.config/l2dpet/weather-search.json");
     SpeechLang() = LangResolve(_cfgLang);
     Log("台词语言：" + LangCnName(LangResolve(_cfgLang)));
     OpenMemory();
@@ -615,6 +681,7 @@ void PetAgent::Run()
                 }
             }
         }
+        if (!asleep && _cfgWeather) RefreshWeather();
         std::string interrupt = reunion;
         reunion.clear();
         std::vector<std::string> ambient;
@@ -792,10 +859,9 @@ void PetAgent::Run()
             }
             if (ev == "weather_ask")     // 主人点了"聊天气"
             {
-                const std::string loc = CfgGetStr("weather_loc");
-                interrupt = "【天气】主人想聊天气。你没有实时天气数据（不要编造具体温度/预报数字）："
-                            "可以按季节、按他现在的心情/作息关心一句，或者直接问他几句"
-                            + (loc.empty() ? "。可以用提问：外面今天怎么样呀？" : ("（他在：" + loc + "）。"));
+                RefreshWeather();
+                interrupt = "【天气】主人想聊天气。根据提供的模型联网天气查询结果自然关心他，1–2 句即可；"
+                            "如果暂无有效查询结果就说明暂时查不到，不要编造具体温度或降雨。";
                 continue;
             }
             if (ev == "joke_told")       // 桌宠本地讲了一条笑话：记进池子（下次补货时作为"已有的"避开）
@@ -939,6 +1005,7 @@ void PetAgent::Run()
             NapMs(100);
             continue;
         }
+        std::vector<const PetQuestions::Item*> questionCandidates;
         if (interrupt.empty())
         {
             interrupt = "【闲时】";
@@ -948,7 +1015,8 @@ void PetAgent::Run()
                                 && _moodState != "asleep" && _moodState != "drowsy";
             if (canAsk)
             {
-                const std::string note = AskCandidatesNote();
+                questionCandidates = _questions.Fresh(3);
+                const std::string note = AskCandidatesNote(questionCandidates);
                 if (!note.empty())
                 {
                     std::string eager;
@@ -969,7 +1037,7 @@ void PetAgent::Run()
             ambient.push_back("用户的鼠标刚在你的" + _lastHover + "附近");
             _lastHover.clear();
         }
-        // 天气闲聊（设置里打开才提）：没有实时数据，所以是"关心/提问"式，不报具体数字
+        // 天气闲聊（设置里打开才提）：复用模型联网查询的 5 小时缓存
         if (_cfgWeather && _cfgLlmIdle)
         {
             static int weatherTick = 0;
@@ -977,8 +1045,7 @@ void PetAgent::Run()
             {
                 ambient.push_back(std::string("想聊天气可以自然提一句")
                                   + (_cfgWeatherLoc.empty() ? "" : ("（主人在：" + _cfgWeatherLoc + "）"))
-                                  + "——你没有实时天气数据，用关心或提问的方式（今天外面热不热呀/记得带伞），"
-                                    "不要编造具体温度或预报数字");
+                                  + "——使用提供的联网天气查询缓存，结合真实天气关心主人；暂无有效结果时不要编造天气。");
             }
         }
         ++_segN;
@@ -1005,8 +1072,9 @@ void PetAgent::Run()
             note += "上一段的警告：" + w + "，请避免。";
         }
         const std::string kind = Contains(interrupt.c_str(), "选项里选了") ? "续戏"
-                               : (StartsWith(interrupt.c_str(), "【回应】") ? "回应"
-                                  : (StartsWith(interrupt.c_str(), "【重逢】") ? "重逢" : "闲时"));
+                               : (StartsWith(interrupt.c_str(), "【天气】") ? "天气"
+                                  : (StartsWith(interrupt.c_str(), "【回应】") ? "回应"
+                                     : (StartsWith(interrupt.c_str(), "【重逢】") ? "重逢" : "闲时")));
         const l2d::LlmSettings cfgNow = l2d::LlmLoadSettings();
         if (cfgNow.key.empty())
         {
@@ -1040,6 +1108,7 @@ void PetAgent::Run()
         _choiceDid = false;   // 只管紧接着的这一段
         snprintf(msg, sizeof(msg), "%s段，LLM 用时 %.1fs", responding ? "回应" : "闲时", _lastLlmAt - t0);
         Log(msg);
+        RestoreQuestionOptions(&seq, questionCandidates);
         // 台词去日期/时间戳（兜底：提示词里已要求不写）
         if (jsonlite::Value* steps = ObjGetMut(&seq, "steps"))
         {
@@ -1708,6 +1777,29 @@ void PetAgent::OpenJokes(bool force)
     PushJokes();
 }
 
+void PetAgent::RefreshWeather()
+{
+    const double now = (double)time(NULL);
+    if (_llmPaused || !_weather.NeedsRefresh(_cfgWeatherLoc, now)) return;
+    const l2d::LlmSettings cfg = l2d::LlmLoadSettings();
+    if (cfg.key.empty()) return;
+    std::string err;
+    Log("让模型联网查询天气：" + _cfgWeatherLoc);
+    const bool ok = _weather.Refresh(_cfgWeatherLoc, now,
+        [cfg](const std::string& location, std::string* response, std::string* error) {
+            return l2d::LlmWeatherSearch(cfg, location, response, error);
+        }, &err);
+    if (ok)
+    {
+        const std::string dir = plat::HomeDir() + "/.config/l2dpet";
+        plat::CreateDir(dir, true);
+        if (!_weather.Save(dir + "/weather-search.json")) Log("天气查询缓存写入失败（本次仍可使用内存缓存）");
+        Log("模型天气查询完成，5 小时内复用");
+    }
+    else Log("模型天气查询未成功：" + err);
+    Report("天气查询", "模型原生联网搜索：" + _cfgWeatherLoc, NULL, ok, err, false, 0);
+}
+
 void PetAgent::PushJokes()
 {
     if (_jokes.Empty()) return;
@@ -1725,12 +1817,15 @@ void PetAgent::PushJokes()
     Rpc(o);
 }
 
-/** 闲时段要提问时：从题库挑 2~3 个候选写进提示词（这是"别总问在干什么"的关键） */std::string PetAgent::AskCandidatesNote() const
+/** 闲时段要提问时：从题库挑 2~3 个候选写进提示词 */
+std::string PetAgent::AskCandidatesNote(const std::vector<const PetQuestions::Item*>& cands) const
 {
-    const std::vector<const PetQuestions::Item*> cands = _questions.Fresh(3);
     if (cands.empty()) return std::string();
     std::string o = "（这段可以用一句台词 + options 问主人一个问题，用来更了解他；**从下面挑一个最贴合当前气氛的**，"
-                    "可以按你的口吻微调措辞、选项照抄或略改；不要问成是非题；问完这段就别再说别的：\n";
+                    "可以按你的口吻微调措辞、选项照抄或略改；不要问成是非题；问完这段就别再说别的。"
+                    "选择候选题时，在同一个 speak 步骤里必须写 question_id（下面的题号，数字）和 options 数组，"
+                    "例如 {\"at\":0,\"speak\":\"问题台词\",\"question_id\":1,\"options\":[\"选项一\",\"选项二\"]}；"
+                    "只写问句不会产生可点击的按钮。候选题：\n";
     for (size_t i = 0; i < cands.size(); ++i)
     {
         o += "  " + std::to_string(i + 1) + ") " + cands[i]->q + " 选项：";
@@ -1864,6 +1959,7 @@ bool ThrottleSeq(jsonlite::Value* seq, double now, double lastQuestionAt, bool a
             if (!allowQuestions || asked || now - lastQuestionAt < kQuestionCooldown || ObjGet(st, "speak") == NULL)
             {
                 ObjDel(st, "options");
+                ObjDel(st, "speak"); // 不允许提问时连问句一起去掉，避免留下无法回答的问题
                 *cutWhat += cutWhat->empty() ? "提问" : "、提问";
             }
             else
@@ -1874,7 +1970,7 @@ bool ThrottleSeq(jsonlite::Value* seq, double now, double lastQuestionAt, bool a
         if (ObjGet(st, "speak") != NULL)
         {
             ++speaks;
-            if (speaks > kMaxSpeakPerSeg && ObjGet(st, "options") == NULL)
+            if ((speaks > kMaxSpeakPerSeg || asked) && ObjGet(st, "options") == NULL)
             {
                 ObjDel(st, "speak");
                 *cutWhat += cutWhat->empty() ? "台词" : "、台词";
@@ -2109,6 +2205,12 @@ bool PetAgent::LlmSequence(const std::string& note, const std::string& memory, j
                         "· 选动作/表情/视线时也可照顾他的偏好与当前作息（比如他在忙就安静些、他爱猫就用猫系姿态）；\n"
                         "· 你觉得重要但记忆里没有的，用提问慢慢弄清（问题见闲时段的候选题）。\n";
         msgs.push_back(mem);
+    }
+    {
+        l2d::LlmMsg weather;
+        weather.role = "system";
+        weather.content = _weather.Context(_cfgWeatherLoc, (double)time(NULL));
+        msgs.push_back(weather);
     }
     // 兜底：多轮上下文是别的语言写的（无论语言是从哪儿改的）→ 丢掉，按当前语言新开一轮
     if (!_history.empty() && _historyLang != LangResolve(_cfgLang))

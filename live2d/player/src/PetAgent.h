@@ -25,6 +25,7 @@
 #include "PetMemory.h"
 #include "PetPersona.h"
 #include "PetQuestions.h"
+#include "PetWeather.h"
 
 class PetAgent
 {
@@ -75,8 +76,9 @@ private:
     std::string CapsDigest() const;                // 能力摘要（喂给性格生成的提示词）
     void PushPersona();                            // 报给面板（模型页显示）
     void OpenQuestions(bool regen);                // 读/生成"问题库"（regen=强制重新生成一批）
-    std::string AskCandidatesNote() const;         // 闲时段要提问时，题库候选 → 提示词片段
+    std::string AskCandidatesNote(const std::vector<const PetQuestions::Item*>& candidates) const;
     void OpenJokes(bool force);                    // 笑话池：读盘 / 不够就补货（LLM）→ 推给桌宠
+    void RefreshWeather();
     void PushJokes();                              // 把池子推给桌宠（本地讲笑话用）
     void CompressMemory(const std::string& reason);   // 记忆压缩（每天自动 / 面板立即）
     void PushLines(const std::string& reason);
@@ -122,6 +124,7 @@ private:
     bool _cfgLlmIdle = true;
     bool _cfgLlmQuestions = true;
     bool _cfgWeather = false;         // 天气闲聊（配置里打开才在闲时提天气）
+    PetWeather _weather;
     std::string _cfgWeatherLoc;       // 主人所在位置（可空）
     std::string _cfgLang = "zh";      // 界面语言（config.str.lang：zh/en/ja/auto）→ 她说的话也用这个语言
     bool _deferLangRewrite = false;   // 语言变了要重写存起来的内容：睡着/暂停时排队，醒来补做

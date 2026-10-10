@@ -5,6 +5,7 @@
  */
 #include "LlmClient.h"
 #include "JsonLite.h"
+#include "Platform.h"
 
 #include <cstdio>
 #include <cstring>
@@ -293,7 +294,7 @@ int CurlProgressCb(void*, curl_off_t, curl_off_t, curl_off_t, curl_off_t)
 }
 
 bool CurlHttpPost(const Endpoint& ep, const std::string& body, const std::string& key,
-                  std::string* resp, std::string* err)
+                  std::string* resp, std::string* err, bool nativeSearch = false)
 {
     static std::once_flag once;   // curl_easy_init 隐式 global_init 不是线程安全的：显式做一次
     std::call_once(once, [] { curl_global_init(CURL_GLOBAL_DEFAULT); });
@@ -324,6 +325,11 @@ bool CurlHttpPost(const Endpoint& ep, const std::string& body, const std::string
     struct curl_slist* h = NULL;
     h = curl_slist_append(h, "Content-Type: application/json");
     h = curl_slist_append(h, ("Authorization: Bearer " + key).c_str());
+    if (nativeSearch)
+    {
+        h = curl_slist_append(h, ("x-api-key: " + key).c_str());
+        h = curl_slist_append(h, "anthropic-version: 2023-06-01");
+    }
     curl_easy_setopt(c, CURLOPT_HTTPHEADER, h);
     const CURLcode rc = curl_easy_perform(c);
     curl_slist_free_all(h);
@@ -464,6 +470,42 @@ bool LlmHasHttps()
     return true;
 #else
     return false;
+#endif
+}
+
+bool LlmWeatherSearch(const LlmSettings& cfg, const std::string& location,
+                      std::string* response, std::string* err)
+{
+    response->clear();
+    if (g_cancel.load() || g_paused.load()) { *err = "已暂停或取消"; return false; }
+    if (cfg.key.empty()) { *err = "没有 API Key"; return false; }
+#if !defined(L2D_WITH_CURL)
+    (void)location;
+    *err = "此构建未编入 libcurl，无法联网搜索";
+    return false;
+#else
+    Endpoint ep;
+    if (!ParseEndpoint(cfg.baseUrl, &ep, err)) return false;
+    // 只有用户选择官方 DeepSeek 时才将同一供应商密钥用于它的原生搜索接口。
+    if (ep.scheme != "https" || ep.host != "api.deepseek.com" || ep.port != 443)
+    { *err = "当前供应商尚未接入原生联网搜索（现支持官方 DeepSeek）"; return false; }
+    if (!CheckEndpointPublic(ep, err)) return false;
+    ep.apiPath = "/anthropic/v1/messages";
+    const time_t currentTime = time(NULL);
+    struct tm local;
+    plat::LocalTime(currentTime, &local);
+    char localTime[80];
+    strftime(localTime, sizeof(localTime), "%Y-%m-%d %H:%M:%S %z", &local);
+    const std::string query = "必须使用 web_search 联网查询城市「" + location
+        + "」的当前天气和今天/明天预报。本机当前日期时间和 UTC 偏移为 " + localTime
+        + "；请按目标城市所在时区确认今天/明天的日期，不要把 UTC 日期当成当地日期。"
+          "优先使用气象机构来源，核对来源城市和日期，不要把不同日期/不一致来源的数据拼成一份实况。"
+          "用中文简要总结天气、温度、降雨和风，标明城市、当地日期、观测/预报时间与来源。"
+          "只写搜索证实的数据；没有查到就明确说明，不要靠知识或猜测补全。";
+    const std::string body = "{\"model\":\"" + JsonEscape(cfg.model)
+        + "\",\"max_tokens\":2048,\"messages\":[{\"role\":\"user\",\"content\":"
+        + "\"" + JsonEscape(query) + "\"}],\"tools\":[{\"type\":\"web_search_20250305\",\"name\":\"web_search\",\"max_uses\":3}]}";
+    return CurlHttpPost(ep, body, cfg.key, response, err, true);
 #endif
 }
 

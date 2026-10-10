@@ -162,6 +162,8 @@ set(L2D_SOURCES
   src/PetJokes.cpp
   src/PetAgent.h
   src/PetAgent.cpp
+  src/PetWeather.h
+  src/PetWeather.cpp
   # 桌宠自带文案的 i18n（气泡台词 / 动态描述；LLM 那份由 agent 按语言生成）
   src/PetI18n.h
   src/PetI18n.cpp
