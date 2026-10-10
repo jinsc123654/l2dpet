@@ -149,7 +149,6 @@ UI_FONT="$UI_DIR/assets/JingNanJunJunTi-JinNanJunJunTi-Bold-2.ttf"
 for t in pet_client.py pet_agent.py pet_memory.py pet_verbs.py; do
     [ -f "$ROOT/live2d/tools/$t" ] && cp -f "$ROOT/live2d/tools/$t" "$STAGE/tools/$t"
 done
-cp -f "$ROOT/PROTOCOL-LLM.md" "$STAGE/tools/PROTOCOL-LLM.md" 2>/dev/null || true
 
 printf '%s\n' "$VERSION" >"$STAGE/VERSION"
 
