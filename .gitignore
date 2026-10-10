@@ -1,0 +1,34 @@
+# 构建输出与本地配置（都不入库）
+build/
+build-*/
+dist/
+cmake-build-*/
+build-clion/
+live2d/player/dist/
+# 机器本地配置（工具链路径等）
+.config.mk
+global_config.mk.old
+# 生成物
+etc/terminfo/
+# Rust 构建输出（若有残留的 cargo 构建树）
+target/
+
+# IDE / 工具状态
+.idea/
+.mimosa/
+.vscode/
+.zcodeignore
+.archify/
+*.swp
+*~
+
+# 临时输出（截图/相机抓图等）
+artifacts/
+*.bmp
+
+# Python 缓存（工具脚本）
+__pycache__/
+*.pyc
+
+# 其它 AI 工具的本地计划文件（不入库）
+.zcode/

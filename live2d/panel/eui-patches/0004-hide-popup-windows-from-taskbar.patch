@@ -1,0 +1,53 @@
+diff --git a/core/window/window_backend.cpp b/core/window/window_backend.cpp
+index e32a9d2..8288687 100644
+--- a/core/window/window_backend.cpp
++++ b/core/window/window_backend.cpp
+@@ -553,6 +553,19 @@ void setImeCursorRect(Handle window, float x, float y, float width, float height
+ #include <dlfcn.h>
+ #endif
+ 
++#if defined(_WIN32)
++// l2dpet 补丁：Windows 侧"不进任务栏"要改扩展样式（WS_EX_TOOLWINDOW），
++// 需要 glfwGetWin32Window / GetWindowLongPtrW。
++#ifndef WIN32_LEAN_AND_MEAN
++#define WIN32_LEAN_AND_MEAN
++#endif
++#ifndef NOMINMAX
++#define NOMINMAX
++#endif
++#define GLFW_EXPOSE_NATIVE_WIN32
++#include <GLFW/glfw3native.h>
++#endif
++
+ namespace core::window {
+ 
+ namespace {
+@@ -589,6 +602,8 @@ Handle createWindow(const WindowCreateRequest& request) {
+     glfwWindowHint(GLFW_TRANSPARENT_FRAMEBUFFER, request.transparent ? GLFW_TRUE : GLFW_FALSE);
+     glfwWindowHint(GLFW_FOCUS_ON_SHOW, request.focusOnShow ? GLFW_TRUE : GLFW_FALSE);
+     glfwWindowHint(GLFW_FOCUSED, request.focusOnShow ? GLFW_TRUE : GLFW_FALSE);
++    // 弹出窗（windowType != 0）都是隐藏创建、定好样式再显示——Windows 侧"不进任务栏"
++    // 的扩展样式必须在显示前改好（见下面 _WIN32 那段的注释）。
+     const bool deferShow = request.windowType != 0 || request.positionSet;
+     glfwWindowHint(GLFW_VISIBLE, deferShow ? GLFW_FALSE : GLFW_TRUE);
+ 
+@@ -665,6 +680,19 @@ Handle createWindow(const WindowCreateRequest& request) {
+                         reinterpret_cast<const unsigned char*>(kClass), (int)sizeof(kClass));
+         XFlush(dpy);
+     }
++#endif
++#if defined(_WIN32)
++    // l2dpet 补丁：**弹出窗口**（右键菜单 windowType=1 / 气泡 2 / 工具窗 3）不进任务栏与
++    // Alt-Tab——它们是附属窗，冒出来一个任务栏按钮很突兀。主窗口（状态与设置）保持原样：
++    // 用户本来就要在任务栏里看到它、能切回来。GLFW 给窗口默认带 WS_EX_APPWINDOW，
++    // 必须一并去掉，否则工具窗样式不生效。此刻窗口还没显示（见上面的 deferShow）。
++    if (request.windowType != 0) {
++        HWND hwnd = glfwGetWin32Window(window);
++        if (hwnd != nullptr) {
++            const LONG_PTR ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
++            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, (ex | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW);
++        }
++    }
+ #endif
+     if (deferShow) {
+         glfwShowWindow(window);

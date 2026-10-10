@@ -1,0 +1,52 @@
+{
+  "v": 1,
+  "exprAlias": {
+    "开心": "星星眼",
+    "害羞": "泪汪汪",
+    "生气": "黑脸"
+  },
+  "body": {
+    "arm.r": {
+      "comment": "右臂 → 作者自己的抬手参数（armup，实测手能到脸前、无接缝）——不走刚性兜底",
+      "rigid": false,
+      "slew": 5.0,
+      "params": [{ "param": "ParamarmupR", "scale": 1.0 }]
+    },
+    "arm.l": {
+      "comment": "左臂（同上）",
+      "rigid": false,
+      "slew": 5.0,
+      "params": [{ "param": "ParamarmupL", "scale": 1.0 }]
+    },
+    "hand.r": {
+      "comment": "右手（作者绑的手部参数）",
+      "rigid": false,
+      "slew": 6.0,
+      "params": [{ "param": "Paramhand1R", "scale": 1.0 }]
+    },
+    "hand.l": {
+      "comment": "左手",
+      "rigid": false,
+      "slew": 6.0,
+      "params": [{ "param": "Paramhand1L", "scale": 1.0 }]
+    }
+  },
+  "gestures": {
+    "raise_hands": {
+      "comment": "双手举到脸前（作者绑定的 armup 参数；clean）",
+      "dur": 2.6,
+      "tracks": [
+        { "param": "ParamarmupR", "keys": [[0, 0], [0.3, 1], [0.8, 1], [1, 0.2]] },
+        { "param": "ParamarmupL", "keys": [[0, 0], [0.3, 1], [0.8, 1], [1, 0.2]] }
+      ]
+    },
+    "mic_pose": {
+      "comment": "拿话筒姿态（作者的表情换美术）",
+      "expr": "拿话筒",
+      "dur": 3.2,
+      "tracks": [
+        { "param": "ParamAngleX", "mode": "add", "keys": [[0, 0], [0.3, 4], [0.8, 3], [1, 0]] }
+      ]
+    }
+  }
+}

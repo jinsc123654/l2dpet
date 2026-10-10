@@ -1,0 +1,42 @@
+diff --git a/core/app/glfw_app_main.cpp b/core/app/glfw_app_main.cpp
+index a512db8..fd5839c 100644
+--- a/core/app/glfw_app_main.cpp
++++ b/core/app/glfw_app_main.cpp
+@@ -188,6 +188,21 @@ void hideWindowToTray(GLFWwindow* window, WindowState& windowState, core::render
+     windowState.nextFrameTime = glfwGetTime();
+ }
+ 
++// l2dpet 补丁 0002：把主窗口抬到 Z 序最前。
++// Windows 上 glfwShowWindow 走 SW_SHOWNA（只显示、不激活、不动 Z 序），
++// glfwFocusWindow 的 SetForegroundWindow 又常被前台锁挡掉（本进程不是前台进程时直接失败）——
++// 结果是窗口"显示"了却压在其他窗口后面，用户看起来像没打开。SetWindowPos(HWND_TOP) 不受前台锁限制。
++void raiseWindowToFront(GLFWwindow* window) {
++#if defined(_WIN32)
++    HWND hwnd = glfwGetWin32Window(window);
++    if (hwnd != nullptr) {
++        SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
++    }
++#else
++    (void)window;
++#endif
++}
++
+ void restoreWindowFromTray(GLFWwindow* window, WindowState& windowState) {
+     if (!windowState.hiddenToTray) {
+         return;
+@@ -195,6 +210,7 @@ void restoreWindowFromTray(GLFWwindow* window, WindowState& windowState) {
+ 
+     glfwRestoreWindow(window);
+     glfwShowWindow(window);
++    raiseWindowToFront(window);
+     glfwFocusWindow(window);
+     windowState.hiddenToTray = false;
+     windowState.hideToTrayRequested = false;
+@@ -431,6 +447,7 @@ void applyWindowControls(app::DslWindowManager<ManagedWindow>& windows, GLFWwind
+                 restoreWindowFromTray(mainWindow, mainState);
+             } else {
+                 glfwShowWindow(mainWindow);
++                raiseWindowToFront(mainWindow);
+                 glfwFocusWindow(mainWindow);
+             }
+             continue;

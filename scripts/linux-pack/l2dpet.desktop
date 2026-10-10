@@ -1,0 +1,19 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Live2D Pet
+Name[zh_CN]=Live2D 桌宠
+GenericName=Desktop Pet
+GenericName[zh_CN]=桌面宠物
+Comment=A Live2D character that lives on your desktop (X11; talks via your own LLM key)
+Comment[zh_CN]=住在桌面上的 Live2D 角色（X11；配自己的 LLM Key 就能聊天）
+Exec=l2dpet
+Icon=l2dpet
+Terminal=false
+Categories=Utility;
+Keywords=live2d;pet;desktop;桌宠;live2d;
+StartupNotify=false
+# 角色窗口（WM_CLASS=l2dpet）有意 SKIP_TASKBAR，不进 dock；进 dock 的是**面板窗口**
+# （EUI 那边写死 WM_CLASS=l2dpet-ui）——这条让 dock/任务栏把面板窗口认成"本应用"，
+# 于是显示的是这里的名字与图标，而不是裸二进制名 + 通用图标。
+StartupWMClass=l2dpet-ui

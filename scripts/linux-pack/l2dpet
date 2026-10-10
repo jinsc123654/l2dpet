@@ -1,0 +1,668 @@
+#!/bin/sh
+# l2dpet — Live2D 桌宠启动器（Linux 桌面：X11 端口 + EUI 面板进程）
+#
+# 它就是"装好之后你点的那个东西"：找模型 → 起桌宠 → 面板/托盘/右键菜单由桌宠自己拉起。
+#
+# 用法：
+#   l2dpet [start] [模型.model3.json]   启动（模型省略=恢复上次选择，首次用模型库第一个）
+#   l2dpet stop                        优雅退出（桌宠会顺手收掉面板进程）
+#   l2dpet restart
+#   l2dpet status                      进程 / 协议端口 / 模型库 / 日志尾部
+#   l2dpet models                      列出模型库里的模型
+#   l2dpet open [页号]                  打开"状态与设置"（0 状态 / 8 外观 / 见 PROTOCOL-LLM.md）
+#   l2dpet logs                        跟随日志（Ctrl-C 退出）
+#   l2dpet version
+#   l2dpet install [--system] [--desktop-icon] [--dock] [--autostart]
+#                                      【AppImage 专用】把自身装到本机（~/.local/opt/l2dpet），
+#                                      并做桌面集成；tar.gz/.deb 装的那份会提示已装好
+#   l2dpet uninstall [--purge] [--purge-models] [--yes]
+#                                      卸载（AppImage 装的那份自己卸；tar.gz 的交给它的脚本；
+#                                      .deb 的提示用 apt remove）。默认保留配置/存档/模型
+#   l2dpet desktop-icon                在 ~/Desktop 放一个启动图标（双击即起）
+#   l2dpet dock                        固定到 Dock/任务栏（GNOME 收藏夹）
+#   l2dpet autostart on|off            登录自启 开/关
+#
+# 环境变量（都可以不改）：
+#   L2DPET_MODEL       指定模型 model3.json（优先于模型库）
+#   L2DPET_MODEL_DIR   模型库目录（默认 ~/.local/share/l2dpet/models）
+#   L2DPET_PORT        协议端口（默认 23333；面板/agent 都连它）
+#   L2DPET_SIZE        角色窗口尺寸（默认 360x640）
+#   L2DPET_ORDER       static（默认：绘制顺序首帧冻结，避免 5.x 模型"胸口弹层"）
+#                      dynamic = 官方 Core 每帧重排（有的模型靠它把手画到裙子前面）
+#   L2DPET_UI_SCALE    面板缩放（默认按屏幕 Xft.dpi 自动算）
+#   L2DPET_LOG         日志文件（默认 ~/.local/state/l2dpet/desktop.log）
+#   L2DPET_FOREGROUND=1 前台跑（调试；Ctrl-C 退出）
+set -u
+
+# ---------------------------------------------------------------- 路径（跟随符号链接：/usr/bin/l2dpet → /opt/l2dpet/l2dpet）
+resolve_dir() {
+    p=$1
+    n=0
+    while [ -L "$p" ] && [ "$n" -lt 40 ]; do
+        t=$(readlink "$p") || break
+        case $t in
+            /*) p=$t ;;
+            *) p=$(dirname "$p")/$t ;;
+        esac
+        n=$((n + 1))
+    done
+    CDPATH= cd -- "$(dirname -- "$p")" 2>/dev/null && pwd
+}
+DIR=$(resolve_dir "$0") || DIR=.
+. "$DIR/desktop-entry.sh" || exit 1
+BIN="$DIR/l2dtest"
+UIBIN="$DIR/l2dpet-ui"
+
+PORT=${L2DPET_PORT:-23333}
+SIZE=${L2DPET_SIZE:-360x640}
+ORDER=${L2DPET_ORDER:-static}
+MODEL_DIR=${L2DPET_MODEL_DIR:-$HOME/.local/share/l2dpet/models}
+STATE_DIR=${XDG_STATE_HOME:-$HOME/.local/state}/l2dpet
+LOG=${L2DPET_LOG:-$STATE_DIR/desktop.log}
+PIDFILE=${L2DPET_PIDFILE:-$STATE_DIR/desktop.pid}
+RUNDIR=${L2DPET_RUNDIR:-$STATE_DIR/desktop.launch}
+
+say() { printf '%s\n' "$*"; }
+die() { printf '[l2dpet] %s\n' "$*" >&2; exit 1; }
+
+# 在跑的桌宠 pid。
+# 首选 pidfile：AppImage 每次运行都会挂到**不同的** /tmp/.mount_* 目录，
+# 按 exe 路径匹配（下面的回退）找不到"另一次运行"起的实例 —— 那会导致
+# `l2dpet stop` 说"没在跑"、再敲一次 l2dpet 又起第二只。所以启动时写 pidfile，
+# 并校验那个 pid 的 exe 确实是 l2dtest（防 pid 复用误杀）。
+pids() {
+    if [ -f "$PIDFILE" ]; then
+        p=$(cat "$PIDFILE" 2>/dev/null || true)
+        if [ -n "$p" ] && [ -d "/proc/$p" ]; then
+            e=$(readlink "/proc/$p/exe" 2>/dev/null || true)
+            case $e in
+                */l2dtest|*/l2dtest\ \(deleted\)|*/l2dtest-*) printf '%s\n' "$p"; return 0 ;;
+            esac
+        fi
+    fi
+    for d in /proc/[0-9]*; do
+        [ -e "$d/exe" ] || continue
+        e=$(readlink "$d/exe" 2>/dev/null) || continue
+        [ "$e" = "$BIN" ] && printf '%s\n' "${d#/proc/}"
+    done
+    return 0
+}
+
+# 包里自带的示例模型（tar.gz / deb / AppImage 都放在程序旁的 models/）
+BUNDLED_MODELS="$DIR/models"
+
+# 模型库是空的（新机器）：把自带示例模型拷进用户模型库——保证没有任何模型也能直接起来。
+# 拷进用户目录而不是直接读包里（AppImage 是只读挂载）：桌宠要在模型旁写能力缓存，面板也要能管理/删除它。
+seed_model() {
+    [ -d "$BUNDLED_MODELS" ] || return 0
+    if [ -d "$MODEL_DIR" ] && [ -n "$(find "$MODEL_DIR" -maxdepth 2 -name '*.model3.json' 2>/dev/null | head -n 1)" ]; then
+        return 0   # 已经有模型了：不动用户的库
+    fi
+    mkdir -p "$MODEL_DIR" || return 0
+    for d in "$BUNDLED_MODELS"/*/; do
+        [ -d "$d" ] || continue
+        n=$(basename "$d")
+        [ -e "$MODEL_DIR/$n" ] && continue
+        cp -R "$d" "$MODEL_DIR/$n" && chmod -R u+w "$MODEL_DIR/$n" \
+            && say "模型库是空的：已放入自带示例模型 $n（Live2D 官方示例，Free Material License）→ $MODEL_DIR/$n"
+    done
+}
+
+find_model() {
+    if [ -n "${L2DPET_MODEL:-}" ]; then
+        printf '%s\n' "$L2DPET_MODEL"
+        return 0
+    fi
+    [ -d "$MODEL_DIR" ] || return 1
+    # 模型库一级/二级目录下的 model3.json，取第一个（与面板"模型"页同一目录）
+    find "$MODEL_DIR" -maxdepth 2 -name '*.model3.json' 2>/dev/null | sort | head -n 1
+}
+
+no_model_help() {
+    say "找不到模型（模型库：$MODEL_DIR）"
+    say ""
+    say "放一个 Live2D 模型进去，二选一："
+    say "  1) 起界面后导入（推荐）：面板「模型」页 → 选 zip…/选目录… → 导入并识别"
+    say "  2) 手动拷贝：把含 model3.json 的文件夹整个拷到 $MODEL_DIR/<名字>/"
+    say ""
+    say "注意模型授权：Live2D 模型有各自的许可（个人使用 / 禁二次分发等），别把别人给的模型再传出去。"
+    say "若模型放在别处，也可以用：L2DPET_MODEL=/路径/x.model3.json l2dpet"
+}
+
+need_display() {
+    if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
+        say "没有图形会话（DISPLAY 与 WAYLAND_DISPLAY 都是空）——桌宠是桌面程序，请在图形会话里跑"
+        say "  无头机器上只想试渲染：l2dtest <模型.model3.json> 0 0.0333 --port headless --render /tmp/frames"
+        die   "（退出）"
+    fi
+}
+
+# 用哪个端口：有 X11 就用 X11 原生端口（功能最全）；只有 Wayland 时退回 GLFW 端口。
+#   X11 端口：置顶 / 拖到任意位置 / 点击穿透（XShape 按角色轮廓）/ 气泡，都是成熟的；
+#   GLFW 端口：GLFW 会走它的 Wayland 后端，能出角色窗，但 Wayland 没有"全局置顶 + 客户端定位"
+#   这类协议（要 layer-shell，GNOME 还不支持），所以位置由合成器决定、窗口矩形内会接住鼠标点击。
+#   （多数发行版的 Wayland 会话带 XWayland，那 DISPLAY 就有值 → 直接走 X11 端口，最省事。）
+pick_port() {
+    if [ -n "${L2DPET_PORT_KIND:-}" ]; then printf '%s' "$L2DPET_PORT_KIND"; return 0; fi
+    if [ -n "${DISPLAY:-}" ]; then printf 'x11'; return 0; fi
+    if [ -n "${WAYLAND_DISPLAY:-}" ]; then printf 'glfwpet'; return 0; fi
+    printf ''
+}
+
+# ---------------------------------------------------------------- 首次运行自动做桌面集成
+# 直接双击/运行 AppImage 时用户并没有"装"过：应用菜单里搜不到、Dock 上只有个通用图标。
+# AppImage 自己**无法**在构建时把菜单项塞进用户的系统（那是用户目录里的东西），所以做成
+# "第一次 start 时请求创建一次"：菜单项 + 图标 + 启动器，全都指向**这个 .AppImage 文件**。
+#   · 幂等：已经指向同一个文件就不重写；换了路径（移动/改名）下次运行会自己更新
+#   · 不想要：L2DPET_NO_INTEGRATE=1，或删掉那两个文件
+#   · 已经 `l2dpet install` 过（那份装在 ~/.local/opt/l2dpet）→ 跳过，别覆盖
+auto_integrate() {
+    [ -n "${APPIMAGE:-}" ] || return 0
+    [ "${L2DPET_NO_INTEGRATE:-0}" = "1" ] && return 0
+    [ -n "${HOME:-}" ] && [ -w "$HOME" ] || return 0
+    [ ! -f "${INST_PREFIX:-}/.installed" ] || return 0
+    case ${INST_PREFIX:-}/l2dpet.AppImage in
+        "$APPIMAGE") return 0 ;;   # 就是 install 过的那份
+    esac
+    _dfile=$HOME/.local/share/applications/l2dpet.desktop
+    _ifile=$HOME/.local/share/l2dpet/l2dpet.png   # 图标要拷到挂载点之外（AppImage 一退挂载就没了）
+    _wfile=$BINDIR/l2dpet
+    # 安装器维护的软链可能指向 tar.gz 或其它固定安装；不能通过重定向覆盖其目标。
+    [ ! -L "$_wfile" ] || return 0
+    _need=0
+    grep -qxF "Exec=$(desktop_entry_exec "$APPIMAGE")" "$_dfile" 2>/dev/null || _need=1
+    [ -f "$_ifile" ] || _need=1
+    [ -x "$_wfile" ] || _need=1
+    # 启动器里也要指向当前这个文件：AppImage 被移动/改名后，旧包装会指向**死路径**，
+    # `[ -x ]` 看不出来（它自己可执行，只是 exec 的目标没了）——所以要查内容
+    grep -qF "$APPIMAGE" "$_wfile" 2>/dev/null || _need=1
+    [ "$_need" = "0" ] && return 0
+    mkdir -p "$HOME/.local/share/applications" "$HOME/.local/share/l2dpet" "$BINDIR" 2>/dev/null || return 0
+    [ -n "${APPDIR:-}" ] && [ -f "$APPDIR/l2dpet.png" ] && cp -f "$APPDIR/l2dpet.png" "$_ifile" 2>/dev/null
+    write_desktop_file "$_dfile" "$APPIMAGE" "$_ifile" || return 1
+    # shell 单引号保护路径中的 $、反引号、空格与双引号。
+    _quoted=$(printf '%s' "$APPIMAGE" | sed "s/'/'\\\\''/g")
+    printf '#!/bin/sh\n# 由 AppImage 首次运行自动生成\nexec '\''%s'\'' "$@"\n' \
+        "$_quoted" >"$_wfile" 2>/dev/null || return 1
+    chmod 755 "$_wfile" 2>/dev/null || true
+    command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$HOME/.local/share/applications" >/dev/null 2>&1 || true
+    say "[l2dpet] 首次运行：已加入应用菜单（搜 \"Live2D\" 或 \"桌宠\"），Dock 里运行时会显示成本应用"
+    say "         不想要就删掉 ~/.local/share/applications/l2dpet.desktop，或设 L2DPET_NO_INTEGRATE=1"
+    return 0
+}
+
+cmd_start() {
+    [ -x "$BIN" ] || die "找不到桌宠程序：$BIN（没装好？重跑 install.sh）"
+    [ -x "$UIBIN" ] || say "[l2dpet] 提示：同目录没有 l2dpet-ui——能跑，但没有托盘/右键菜单/设置面板"
+    need_display
+    # 集成放在"已经在跑了"的早退**之前**：否则机器上已有实例时（比如刚重起过、或 AppImage
+    # 被移动后用户又点了一次）走不到这里，菜单项就一直指着旧路径。
+    auto_integrate || die "创建桌面入口失败：请检查用户目录权限"
+    running=$(pids | head -n 1)
+    if [ -n "$running" ]; then
+        say "已经在跑了（pid $running）——要重起用：l2dpet restart"
+        return 0
+    fi
+    model=${1:-${L2DPET_MODEL:-}}
+    explicit_model=0
+    [ -z "$model" ] || explicit_model=1
+    [ -z "$model" ] && seed_model
+    [ -z "$model" ] && model=$(find_model)
+    if [ -z "$model" ] || [ ! -f "$model" ]; then
+        no_model_help
+        return 1
+    fi
+    mkdir -p "$(dirname -- "$LOG")"
+    # 默认不传模型路径，让主程序按 config 恢复上次选择；仅显式指定时覆盖。
+    if [ "$explicit_model" = "1" ]; then
+        set -- "$model" 0 0.0333 --model-dir "$MODEL_DIR"
+    else
+        set -- 0 --model-dir "$MODEL_DIR"
+    fi
+    kind=$(pick_port)
+    case $kind in
+        x11)
+            set -- "$@" --pet --ctl "$PORT" --size "$SIZE" --order "$ORDER"
+            ;;
+        glfwpet)
+            say "[l2dpet] 只有 Wayland 会话（DISPLAY 为空）→ 用 GLFW 端口起"
+            say "         限制：Wayland 没有全局置顶/定位协议，角色出现在合成器给的位置、窗口矩形内会接住鼠标点击；"
+            say "         装上 XWayland（多数发行版的 Wayland 会话自带）后重启本程序，就能回到置顶 + 拖拽定位 + 点击穿透。"
+            say "         想强制用别的端口：L2DPET_PORT_KIND=x11|glfwpet"
+            set -- "$@" --pet --port glfwpet --ctl "$PORT" --size "$SIZE" --order "$ORDER"
+            ;;
+        *)
+            need_display
+            return 1
+            ;;
+    esac
+    if [ "${L2DPET_DRY_RUN:-0}" = "1" ]; then
+        # 只看"会怎么起"（含端口/会话选择），不真起——排错与打包自检都用它
+        say "（dry-run）会执行：$BIN $*"
+        return 0
+    fi
+    if [ "${L2DPET_FOREGROUND:-0}" = "1" ]; then
+        say "前台运行（Ctrl-C 退出）：$BIN $*"
+        exec "$BIN" "$@"
+    fi
+    if command -v setsid >/dev/null 2>&1; then
+        setsid "$BIN" "$@" >>"$LOG" 2>&1 &
+    else
+        "$BIN" "$@" >>"$LOG" 2>&1 &
+    fi
+    launched=$!
+    sleep 2
+    pid=$(pids | head -n 1)
+    if [ -z "$pid" ]; then
+        say "启动失败——日志尾部："
+        tail -n 20 "$LOG" 2>/dev/null
+        return 1
+    fi
+    # 记下 pid（外加这次"怎么起的"，l2dpet status 能看）：AppImage 每次挂载点不同，
+    # 没有 pidfile 就没法从"另一次运行"里停掉它
+    mkdir -p "$STATE_DIR" 2>/dev/null || true
+    printf '%s\n' "$pid" >"$PIDFILE" 2>/dev/null || true
+    printf 'pid=%s\nport=%s\nkind=%s\nmodel=%s\ncmd=%s\n' \
+        "$pid" "$PORT" "${kind:-x11}" "$model" "$BIN" >"$RUNDIR" 2>/dev/null || true
+    if [ "$explicit_model" = "1" ]; then
+        say "已启动：pid $pid，模型 $(basename "$(dirname "$model")")/$(basename "$model")"
+    else
+        say "已启动：pid $pid，模型按上次选择恢复（首次使用模型库第一个）"
+    fi
+    say "面板：托盘图标 → 状态与设置…（或在角色上右键）｜日志：l2dpet logs"
+    : "$launched"   # （$! 只是记录用；真正的判据是上面按 pidfile/exe 找到的 pid）
+}
+
+cmd_stop() {
+    list=$(pids)
+    if [ -z "$list" ]; then
+        say "没有在跑"
+        return 0
+    fi
+    for p in $list; do kill -TERM "$p" 2>/dev/null || true; done
+    i=0
+    while [ "$i" -lt 20 ] && [ -n "$(pids)" ]; do
+        sleep 0.25
+        i=$((i + 1))
+    done
+    left=$(pids)
+    if [ -n "$left" ]; then
+        say "还在退出（pid $left）……再等 3 秒"
+        sleep 3
+        for p in $(pids); do kill -KILL "$p" 2>/dev/null || true; done
+    fi
+    rm -f "$PIDFILE" "$RUNDIR" 2>/dev/null || true
+    say "已停止"
+}
+
+port_listening() {
+    if command -v ss >/dev/null 2>&1; then
+        ss -ltn 2>/dev/null | grep -q ":$PORT " && return 0
+    elif command -v netstat >/dev/null 2>&1; then
+        netstat -ltn 2>/dev/null | grep -q ":$PORT " && return 0
+    else
+        return 2
+    fi
+    return 1
+}
+
+cmd_status() {
+    list=$(pids)
+    if [ -n "$list" ]; then
+        say "桌宠：运行中（pid $(printf '%s ' $list)）"
+        # 启动时记下的"怎么起的"（端口/会话/模型）——排错时先看这一行
+        if [ -f "$RUNDIR" ]; then
+            m=$(sed -n 's/^model=//p' "$RUNDIR" | head -n1)
+            k=$(sed -n 's/^kind=//p' "$RUNDIR" | head -n1)
+            pn=$(sed -n 's/^port=//p' "$RUNDIR" | head -n1)
+            [ -n "$m" ] && say "  起法：端口档=$k 协议口=$pn 模型=$(basename "$(dirname "$m")")/$(basename "$m")"
+        fi
+    else
+        say "桌宠：没在跑（l2dpet 启动）"
+    fi
+    port_listening
+    case $? in
+        0) say "协议端口：127.0.0.1:$PORT 在听（面板/agent 都连它）" ;;
+        1) say "协议端口：127.0.0.1:$PORT 没在听" ;;
+        2) say "协议端口：装个 ss/netstat 才能查（跳过）" ;;
+    esac
+    n=$(find "$MODEL_DIR" -maxdepth 2 -name '*.model3.json' 2>/dev/null | wc -l)
+    say "模型库：$MODEL_DIR（$n 个模型）"
+    if [ -f "$LOG" ]; then
+        say "日志：$LOG"
+        tail -n 5 "$LOG"
+    fi
+}
+
+cmd_models() {
+    if [ ! -d "$MODEL_DIR" ]; then
+        no_model_help
+        return 1
+    fi
+    found=0
+    for m in $(find "$MODEL_DIR" -maxdepth 2 -name '*.model3.json' 2>/dev/null | sort); do
+        found=1
+        say "  $(basename "$(dirname "$m")")/$(basename "$m")"
+    done
+    if [ "$found" = "0" ]; then
+        no_model_help
+        return 1
+    fi
+    say ""
+    say "模型库：$MODEL_DIR（换模型：面板「模型」页，或 l2dpet stop && L2DPET_MODEL=… l2dpet）"
+}
+
+cmd_open() {
+    page=${1:-0}
+    if ! command -v python3 >/dev/null 2>&1; then
+        say "需要 python3 才能从命令行开面板；也可以直接点托盘图标 / 在角色上右键"
+        return 1
+    fi
+    python3 - "$PORT" "$page" <<'PY' || say "没连上桌宠（它在跑吗？l2dpet status）"
+import json, socket, sys
+port, page = int(sys.argv[1]), int(sys.argv[2])
+s = socket.create_connection(("127.0.0.1", port), timeout=5)
+s.sendall((json.dumps({"cmd": "panel", "page": page}) + "\n").encode())
+print(s.makefile().readline().strip())
+PY
+}
+
+# ================================================================ 桌面集成
+# 三种装法（AppImage / tar.gz / deb）共用这一份实现；install.sh 的 --desktop-icon / --dock /
+# --autostart 也是转调这里，避免同一件事写三遍。
+INST_PREFIX=${L2DPET_PREFIX:-$HOME/.local/opt/l2dpet}
+
+scope_dirs() {   # 按 SYSTEM 决定各目录（用户级 / 系统级）
+    if [ "${L2DPET_SYSTEM:-0}" = "1" ]; then
+        INST_PREFIX=${L2DPET_PREFIX:-/opt/l2dpet}
+        BINDIR=/usr/bin
+        DESKTOP_DIR=/usr/share/applications
+        ICONROOT=/usr/share/icons/hicolor
+    else
+        BINDIR=$HOME/.local/bin
+        DESKTOP_DIR=$HOME/.local/share/applications
+        ICONROOT=$HOME/.local/share/icons/hicolor
+    fi
+}
+scope_dirs
+
+# 菜单模板（.desktop）：包里/装好之后/系统目录各找一遍。
+desktop_template() {
+    for p in "$DIR/share/applications/l2dpet.desktop" "${APPDIR:-}/l2dpet.desktop" \
+             "${APPDIR:-}/usr/bin/share/applications/l2dpet.desktop" \
+             /usr/share/applications/l2dpet.desktop; do
+        if [ -n "$p" ] && [ -f "$p" ]; then printf '%s\n' "$p"; return 0; fi
+    done
+    return 1
+}
+
+# 从 .desktop 里取"怎么启动本应用"（装了就用装好的入口，没装就用当前这份）
+self_exec() {
+    if [ -n "${APPIMAGE:-}" ]; then printf '%s\n' "$INST_PREFIX/l2dpet.AppImage"; return 0; fi
+    if [ -x "$DIR/l2dpet" ]; then printf '%s\n' "$DIR/l2dpet"; return 0; fi
+    printf '%s\n' "$BIN"
+}
+
+cmd_install_icons() {   # 写菜单项 + 图标（用户级/系统级都走这里）
+    mkdir -p "$DESKTOP_DIR" "$ICONROOT/128x128/apps" || return 1
+    write_desktop_file "$DESKTOP_DIR/l2dpet.desktop" "$1" "$2"
+    if [ -n "${APPDIR:-}" ] && [ -f "$APPDIR/l2dpet.png" ]; then
+        cp -f "$APPDIR/l2dpet.png" "$ICONROOT/128x128/apps/l2dpet.png"
+    elif [ -f "$DIR/l2dpet.png" ]; then
+        cp -f "$DIR/l2dpet.png" "$ICONROOT/128x128/apps/l2dpet.png"
+    fi
+    command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$DESKTOP_DIR" >/dev/null 2>&1 || true
+    command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -q -t -f "$ICONROOT" >/dev/null 2>&1 || true
+    return 0
+}
+
+cmd_desktop_icon() {    # ~/Desktop 上的启动图标（GNOME 的桌面图标扩展只认这个目录）
+    DESK=$(xdg-user-dir DESKTOP 2>/dev/null || true)
+    if [ -z "$DESK" ] || [ "$DESK" = "$HOME" ]; then DESK=$HOME/Desktop; fi
+    if [ ! -d "$DESK" ]; then say "没有桌面目录（$DESK）——跳过"; return 1; fi
+    write_desktop_file "$DESK/l2dpet.desktop" "$(self_exec)" "$INST_PREFIX/l2dpet.png"
+    chmod 755 "$DESK/l2dpet.desktop"     # 桌面启动器必须可执行，否则只能看不能双击
+    command -v gio >/dev/null 2>&1 && gio set "$DESK/l2dpet.desktop" metadata::trusted true 2>/dev/null || true
+    say "桌面图标 → $DESK/l2dpet.desktop"
+}
+
+cmd_dock() {            # GNOME 收藏夹（其它桌面环境打印手动固定提示）
+    if command -v gsettings >/dev/null 2>&1 && gsettings get org.gnome.shell favorite-apps >/dev/null 2>&1; then
+        cur=$(gsettings get org.gnome.shell favorite-apps)
+        case $cur in
+            *l2dpet.desktop*) say "Dock 里已经有它了" ;;
+            *)
+                new=$(printf '%s' "$cur" | sed "s/^\[\(.*\)\]$/[\1, 'l2dpet.desktop']/")
+                if gsettings set org.gnome.shell favorite-apps "$new"; then
+                    say "已固定到 Dock（GNOME 收藏夹）；不想要就在 Dock 上右键 → 从收藏夹移除"
+                else
+                    say "写 GNOME 收藏夹失败——手动：应用菜单里右键 l2dpet → 添加到收藏夹"
+                fi
+                ;;
+        esac
+    else
+        say "不是 GNOME（或没有 gsettings）——手动固定：应用菜单里右键本应用 → 固定/添加到收藏夹"
+    fi
+}
+
+cmd_autostart() {       # 登录自启 on/off
+    AD=$HOME/.config/autostart
+    ENTRY=$AD/l2dpet.desktop
+    case ${1:-on} in
+        off)
+            rm -f "$ENTRY" && say "已关掉登录自启（$ENTRY）"
+            ;;
+        on)
+            mkdir -p "$AD"
+            { printf 'X-GNOME-Autostart-enabled=true\n'
+              write_desktop_file /dev/stdout "$(self_exec)" "$INST_PREFIX/l2dpet.png"; } >"$ENTRY"
+            say "登录自启已开 → $ENTRY（不想要就删掉它，或 l2dpet autostart off）"
+            ;;
+        *) say "用法：l2dpet autostart on|off"; return 2 ;;
+    esac
+}
+
+# ================================================================ install / uninstall
+# AppImage：把"这一个文件"装进 ~/.local/opt/l2dpet（带启动器软链与菜单项），之后就能像
+# 正常安装的软件一样用 `l2dpet`；tar.gz / deb 那份则提示已装好 / 交给它们自己的卸载器。
+cmd_install() {
+    SYSTEM=0
+    DESKICON=0
+    DOCKPIN=0
+    AUTOST=0
+    while [ $# -gt 0 ]; do
+        case $1 in
+            --system) SYSTEM=1; AUTOST=1 ;;
+            --desktop-icon) DESKICON=1 ;;
+            --dock) DOCKPIN=1 ;;
+            --autostart) AUTOST=1 ;;
+            -h|--help) say "用法：l2dpet install [--system] [--desktop-icon] [--dock] [--autostart]"; return 0 ;;
+            *) say "不认识的参数：$1"; return 2 ;;
+        esac
+        shift
+    done
+    L2DPET_SYSTEM=$SYSTEM
+    scope_dirs
+    if [ -z "${APPIMAGE:-}" ]; then
+        say "这份不是 AppImage（是 tar.gz 或 .deb 装好的）——不用再 install。"
+        say "想加图标入口：l2dpet desktop-icon / l2dpet dock / l2dpet autostart on"
+        return 0
+    fi
+    if [ "$SYSTEM" = "1" ] && [ "$(id -u)" != "0" ]; then
+        say "--system 需要 root（sudo l2dpet install --system）"
+        return 1
+    fi
+    if [ "$INST_PREFIX" = "$(dirname -- "$APPIMAGE")" ]; then
+        say "已经装在这个位置了（$INST_PREFIX）——升级就把新的 .AppImage 覆盖成 $INST_PREFIX/l2dpet.AppImage"
+        return 0
+    fi
+    mkdir -p "$INST_PREFIX" "$BINDIR" 2>/dev/null || true
+    cp -f "$APPIMAGE" "$INST_PREFIX/l2dpet.AppImage" || { say "拷贝失败：$INST_PREFIX"; return 1; }
+    chmod 755 "$INST_PREFIX/l2dpet.AppImage"
+    if [ -n "${APPDIR:-}" ] && [ -f "$APPDIR/l2dpet.png" ]; then
+        cp -f "$APPDIR/l2dpet.png" "$INST_PREFIX/l2dpet.png"
+    fi
+    printf '%s\n' "$(cat "$DIR/VERSION" 2>/dev/null || echo '?')" >"$INST_PREFIX/VERSION" 2>/dev/null || true
+    # 启动器：一个只做转发的小脚本（好让 l2dpet 在 PATH 里可用，且指向装好的那份 AppImage）
+    cat >"$BINDIR/l2dpet" <<EOF
+#!/bin/sh
+# 由 l2dpet install 生成：转发到装好的 AppImage（\`l2dpet uninstall\` 会删掉本文件）
+exec "$INST_PREFIX/l2dpet.AppImage" "\$@"
+EOF
+    chmod 755 "$BINDIR/l2dpet"
+    say "程序 → $INST_PREFIX/l2dpet.AppImage"
+    say "启动器 → $BINDIR/l2dpet"
+    case ":$PATH:" in
+        *":$BINDIR:"*) ;;
+        *) say "注意：$BINDIR 不在 PATH 里——加一句 export PATH=\"\$PATH:$BINDIR\"，或直接用 $BINDIR/l2dpet" ;;
+    esac
+    cmd_install_icons "$INST_PREFIX/l2dpet.AppImage" "$INST_PREFIX/l2dpet.png"
+    say "应用菜单项已装（搜 \"Live2D\" 或 \"桌宠\"）"
+    [ "$DESKICON" = "1" ] && cmd_desktop_icon
+    [ "$DOCKPIN" = "1" ] && cmd_dock
+    [ "$AUTOST" = "1" ] && cmd_autostart on
+    MODELS=${L2DPET_MODEL_DIR:-$HOME/.local/share/l2dpet/models}
+    mkdir -p "$MODELS"
+    say ""
+    say "完成。下一步：l2dpet（模型库空着会先放入自带的示例模型 Hiyori；自己的模型用面板「模型」页导入）"
+    say "卸载：l2dpet uninstall（默认保留配置/存档/模型）"
+}
+
+cmd_uninstall() {
+    PURGE=0
+    PURGE_MODELS=0
+    YES=0
+    for a in "$@"; do
+        case $a in
+            --purge) PURGE=1 ;;
+            --purge-models) PURGE_MODELS=1 ;;
+            --yes|-y) YES=1 ;;
+            -h|--help) say "用法：l2dpet uninstall [--purge] [--purge-models] [--yes]"; return 0 ;;
+            *) say "不认识的参数：$a"; return 2 ;;
+        esac
+    done
+    if [ -z "${APPIMAGE:-}" ]; then
+        if [ -x "$DIR/uninstall.sh" ]; then
+            # tar.gz 装的：它自带卸载器（含路径保护与数据保留策略）→ 原样转交
+            exec sh "$DIR/uninstall.sh" "$@"
+        fi
+        say "这份是 .deb 装的（$DIR）——卸载：sudo apt remove l2dpet"
+        say "（配置 ~/.config/l2dpet、存档 ~/.local/state/l2dpet、模型库都保留；要清就手动删）"
+        return 0
+    fi
+    # AppImage 装的那份：停 → 删程序 + 启动器 + 菜单项 + 桌面图标 + Dock 项 + 自启
+    list=$(pids)
+    if [ -n "$list" ]; then
+        for p in $list; do kill -TERM "$p" 2>/dev/null || true; done
+        sleep 2
+    fi
+    case $INST_PREFIX in
+        ""|/|"$HOME") say "拒绝：安装目录看起来不对（$INST_PREFIX）"; return 1 ;;
+    esac
+    if [ -f "$INST_PREFIX/l2dpet.AppImage" ]; then
+        rm -rf -- "$INST_PREFIX"
+        say "已删除程序目录 $INST_PREFIX"
+    else
+        say "没找到 $INST_PREFIX/l2dpet.AppImage（直接运行、没 install 过就是这种情况）——继续清理集成入口"
+    fi
+    [ -e "$BINDIR/l2dpet" ] && rm -f "$BINDIR/l2dpet" && say "已删除 $BINDIR/l2dpet"
+    rm -f "$DESKTOP_DIR/l2dpet.desktop" "$ICONROOT/128x128/apps/l2dpet.png" 2>/dev/null || true
+    # 首次运行自动集成时拷到挂载点之外的图标（只读运行也会留下它）
+    if [ -f "$HOME/.local/share/l2dpet/l2dpet.png" ]; then
+        rm -f "$HOME/.local/share/l2dpet/l2dpet.png"
+        rmdir "$HOME/.local/share/l2dpet" 2>/dev/null || true
+        say "已删除自动集成留下的图标"
+    fi
+    DESK=$(xdg-user-dir DESKTOP 2>/dev/null || true)
+    if [ -z "$DESK" ] || [ "$DESK" = "$HOME" ]; then DESK=$HOME/Desktop; fi
+    [ -f "$DESK/l2dpet.desktop" ] && rm -f "$DESK/l2dpet.desktop" && say "已删除桌面图标"
+    rm -f "$HOME/.config/autostart/l2dpet.desktop" 2>/dev/null || true
+    if command -v gsettings >/dev/null 2>&1 && gsettings get org.gnome.shell favorite-apps >/dev/null 2>&1; then
+        cur=$(gsettings get org.gnome.shell favorite-apps)
+        case $cur in
+            *l2dpet.desktop*)
+                new=$(printf '%s' "$cur" | sed "s/, 'l2dpet.desktop'//; s/'l2dpet.desktop', //; s/'l2dpet.desktop'//")
+                gsettings set org.gnome.shell favorite-apps "$new" 2>/dev/null && say "已从 Dock 收藏夹移除"
+                ;;
+        esac
+    fi
+    command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$DESKTOP_DIR" >/dev/null 2>&1 || true
+    if [ "$PURGE" = "1" ]; then
+        case $HOME in
+            ""|/) say "拒绝：HOME 不可信（${HOME:-空}），跳过数据删除"; PURGE=0 ;;
+        esac
+    fi
+    if [ "$PURGE" = "1" ]; then
+        if [ "$YES" = "0" ]; then
+            say ""
+            say "要删除这些数据（配置/记忆/亲密度存档/日志）："
+            say "  ~/.config/l2dpet  ~/.local/state/l2dpet"
+            printf '确认？[y/N] '
+            read -r ans
+            case $ans in y|Y|yes|YES) ;; *) say "跳过数据删除"; PURGE=0 ;; esac
+        fi
+        if [ "$PURGE" = "1" ]; then
+            [ -d "$HOME/.config/l2dpet" ] && rm -rf -- "$HOME/.config/l2dpet"
+            [ -d "$HOME/.local/state/l2dpet" ] && rm -rf -- "$HOME/.local/state/l2dpet"
+            say "已删除配置与存档"
+            if [ "$PURGE_MODELS" = "1" ]; then
+                [ -d "$HOME/.local/share/l2dpet/models" ] && rm -rf -- "$HOME/.local/share/l2dpet/models"
+                say "已删除模型库"
+            else
+                say "模型库保留：~/.local/share/l2dpet/models"
+            fi
+        fi
+    else
+        say "数据和模型都保留（配置 ~/.config/l2dpet，模型 ~/.local/share/l2dpet/models）"
+    fi
+    say "完成"
+}
+
+# 分发命令。注意：**不能写 `shift 2>/dev/null || true`**——`shift` 是 POSIX 特殊内建，
+# 参数不够时会让**非交互 shell 直接退出**（dash 实测：rc=2、后面的语句一行都不执行），
+# 再叠加 2>/dev/null 就变成"敲 l2dpet 一点反应都没有"（踩过）。一律先判 $# 再 shift。
+case ${1:-start} in
+    start)
+        if [ $# -gt 0 ]; then shift; fi
+        cmd_start "${1:-}"
+        ;;
+    stop) cmd_stop ;;
+    restart) cmd_stop; cmd_start ;;
+    status) cmd_status ;;
+    models|model) cmd_models ;;
+    open)
+        if [ $# -gt 0 ]; then shift; fi
+        cmd_open "${1:-0}"
+        ;;
+    logs)
+        [ -f "$LOG" ] || die "还没有日志（$LOG）——先 l2dpet 启动"
+        tail -f "$LOG"
+        ;;
+    version|--version)
+        v=$(cat "$DIR/VERSION" 2>/dev/null || echo "?")
+        say "l2dpet $v"
+        "$BIN" --version 2>/dev/null | head -n 1 || true
+        ;;
+    install)
+        if [ $# -gt 0 ]; then shift; fi
+        cmd_install "$@"
+        ;;
+    uninstall)
+        if [ $# -gt 0 ]; then shift; fi
+        cmd_uninstall "$@"
+        ;;
+    desktop-icon) cmd_desktop_icon ;;
+    dock) cmd_dock ;;
+    autostart)
+        if [ $# -gt 0 ]; then shift; fi
+        cmd_autostart "${1:-on}"
+        ;;
+    -h|--help|help)
+        sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'
+        ;;
+    *)
+        say "不认识的命令：$1"
+        say "用法：l2dpet [start|stop|restart|status|models|open|logs|version|install|uninstall|desktop-icon|dock|autostart]"
+        exit 2
+        ;;
+esac

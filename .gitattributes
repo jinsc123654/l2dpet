@@ -1,0 +1,17 @@
+# 行尾策略（三端一致；不写清楚的话，各人主机的 core.autocrlf 不同会各自改写工作区）
+#
+#   · shell 脚本 / 补丁：必须 LF
+#     —— 带 CRLF 的 bash 脚本在 Linux/macOS 上 `./build-player-win.sh` 会直接跑不起来
+#        （`bash: $'\r': command not found`）；补丁带 CRLF 会让 git apply 对不上上下文。
+#   · Windows 批处理：必须 CRLF（cmd 对 LF 结尾的 .bat 解析会出错）。
+#
+# 其余文件交给各平台默认（text=auto），避免一刀切影响二进制与三方源码。
+*.sh    text eol=lf
+*.patch text eol=lf
+*.bat   text eol=crlf
+
+# 仓库自带的预编译库（live2d/3rd/CubismCore 的 Core）：二进制，
+# 别让任何文本/行尾处理碰到它们（碰了就是"链接报错但看不出为什么"）
+*.lib binary
+*.a   binary
+*.dll binary

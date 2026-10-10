@@ -1,0 +1,64 @@
+diff --git a/3rd/tray/tray.h b/3rd/tray/tray.h
+index 4ba47ea..d022a0b 100644
+--- a/3rd/tray/tray.h
++++ b/3rd/tray/tray.h
+@@ -240,10 +240,12 @@ static LRESULT CALLBACK _tray_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam,
+     break;
+   case WM_COMMAND:
+     if (wparam >= ID_TRAY_FIRST) {
+-      MENUITEMINFO item = {
+-          .cbSize = sizeof(MENUITEMINFO), .fMask = MIIM_ID | MIIM_DATA,
++      /* 与 _tray_menu 一致用 W 版（结构体大小不同：MENUITEMINFOW 比 A 版大，
++         用 A 版结构体去接 W 版菜单的项会读错尺寸） */
++      MENUITEMINFOW item = {
++          .cbSize = sizeof(MENUITEMINFOW), .fMask = MIIM_ID | MIIM_DATA,
+       };
+-      if (GetMenuItemInfo(hmenu, wparam, FALSE, &item)) {
++      if (GetMenuItemInfoW(hmenu, wparam, FALSE, &item)) {
+         struct tray_menu *menu = (struct tray_menu *)item.dwItemData;
+         if (menu != NULL && menu->cb != NULL) {
+           menu->cb(menu);
+@@ -256,16 +258,22 @@ static LRESULT CALLBACK _tray_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam,
+   return DefWindowProc(hwnd, msg, wparam, lparam);
+ }
+ 
++/* l2dpet 补丁 0003：菜单文字按 UTF-8 解，改走 W 版 API。
++   原实现用 ANSI 的 MENUITEMINFO / InsertMenuItem——标签（EUI 侧给的是 UTF-8）
++   会被按本地代码页（如 936）解释，中文/日文在托盘菜单里全是乱码。
++   这里把标签转成 UTF-16 再用 *W 版；顺带把 MIIM_TYPE 拆成 MIIM_FTYPE|MIIM_STRING
++   （MIIM_TYPE 不允许用在 InsertMenuItem 上）。*/
+ static HMENU _tray_menu(struct tray_menu *m, UINT *id) {
+   HMENU hmenu = CreatePopupMenu();
+   for (; m != NULL && m->text != NULL; m++, (*id)++) {
+     if (strcmp(m->text, "-") == 0) {
+-      InsertMenu(hmenu, *id, MF_SEPARATOR, TRUE, "");
++      InsertMenuW(hmenu, *id, MF_SEPARATOR, TRUE, L"");
+     } else {
+-      MENUITEMINFO item;
++      MENUITEMINFOW item;
++      WCHAR wide[512];
+       memset(&item, 0, sizeof(item));
+-      item.cbSize = sizeof(MENUITEMINFO);
+-      item.fMask = MIIM_ID | MIIM_TYPE | MIIM_STATE | MIIM_DATA;
++      item.cbSize = sizeof(MENUITEMINFOW);
++      item.fMask = MIIM_ID | MIIM_FTYPE | MIIM_STRING | MIIM_STATE | MIIM_DATA;
+       item.fType = 0;
+       item.fState = 0;
+       if (m->submenu != NULL) {
+@@ -279,10 +287,14 @@ static HMENU _tray_menu(struct tray_menu *m, UINT *id) {
+         item.fState |= MFS_CHECKED;
+       }
+       item.wID = *id;
+-      item.dwTypeData = m->text;
++      /* InsertMenuItemW 会把字符串拷进菜单，栈上的宽缓冲用完即弃是安全的 */
++      wide[0] = L'\0';
++      MultiByteToWideChar(CP_UTF8, 0, m->text, -1, wide,
++                          (int)(sizeof(wide) / sizeof(wide[0])));
++      item.dwTypeData = wide;
+       item.dwItemData = (ULONG_PTR)m;
+ 
+-      InsertMenuItem(hmenu, *id, TRUE, &item);
++      InsertMenuItemW(hmenu, *id, TRUE, &item);
+     }
+   }
+   return hmenu;
