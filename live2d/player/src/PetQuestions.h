@@ -27,6 +27,7 @@ public:
 
     struct Item
     {
+        std::string id;       // Stable local ID; old caches derive it from the canonical question.
         std::string topic;    // 题材（作息/口味/爱好…）
         std::string q;        // 问题（她口吻的短句）
         std::vector<std::string> options;
@@ -53,7 +54,7 @@ public:
     int AnsweredCount() const;
     bool Stale(double maxAgeSec) const;   // 生成时间超过 maxAgeSec（或没有时间戳）
 
-    /** 还没问过的候选（≤n 条，按题材轮转：先没答过的题材，再没问过的） */
+    /** 还没问过的候选（≤n 条）；未回答的问题也不重复主动询问。 */
     std::vector<const Item*> Fresh(size_t n) const;
     /** 记录"问了这题"：按问题文本模糊匹配；找不到（LLM 自创）则新增一条 asked=1 */
     void MarkAsked(const std::string& q, const std::vector<std::string>& options);
@@ -62,6 +63,7 @@ public:
 
     /** 给提示词的"已知"摘要（已答/已问的题面，防重复） */
     std::string KnownText() const;
+    bool AlreadyAsked(const std::string& q) const;
     /** 面板/日志用一行摘要 */
     std::string Summary() const;
 

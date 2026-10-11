@@ -43,6 +43,7 @@ std::atomic<bool> g_cancel{ false };
 std::atomic<bool> g_paused{ false };
 std::mutex g_statusMu;
 LlmStatus g_status;
+LlmTokenStats g_tokens;
 
 void RecordStatus(bool ok, const std::string& err)
 {
@@ -273,6 +274,7 @@ std::string BuildBody(const LlmSettings& cfg, const std::vector<LlmMsg>& msgs, f
     char temp[32];
     snprintf(temp, sizeof(temp), "%.2f", temperature);
     body += std::string("],\"temperature\":") + temp;
+    if (cfg.maxReplyTokens > 0) body += ",\"max_tokens\":" + std::to_string(cfg.maxReplyTokens);
     if (jsonMode) body += ",\"response_format\":{\"type\":\"json_object\"}";
     body += "}";
     return body;
@@ -522,6 +524,12 @@ bool LlmChat(const LlmSettings& cfg, const std::vector<LlmMsg>& msgs, float temp
     return ok;
 }
 
+LlmTokenStats LlmGetTokenStats()
+{
+    std::lock_guard<std::mutex> lk(g_statusMu);
+    return g_tokens;
+}
+
 static bool LlmChatImpl(const LlmSettings& cfg, const std::vector<LlmMsg>& msgs, float temperature,
                         bool jsonMode, std::string* content, std::string* err, LlmUsage* usage)
 {
@@ -563,6 +571,23 @@ static bool LlmChatImpl(const LlmSettings& cfg, const std::vector<LlmMsg>& msgs,
         *err = "响应不是合法 JSON";
         return false;
     }
+    LlmUsage measured;
+    measured.ms = (long long)std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+    measured.tokIn = (long long)v.get("usage").get("prompt_tokens").numOr(0);
+    measured.tokOut = (long long)v.get("usage").get("completion_tokens").numOr(0);
+    {
+        std::lock_guard<std::mutex> lk(g_statusMu);
+        g_tokens.last = measured;
+        g_tokens.total.ms += measured.ms;
+        g_tokens.total.tokIn += measured.tokIn;
+        g_tokens.total.tokOut += measured.tokOut;
+    }
+    if (usage != NULL)
+    {
+        usage->ms += measured.ms;
+        usage->tokIn += measured.tokIn;
+        usage->tokOut += measured.tokOut;
+    }
     const jsonlite::Value& choices = v.get("choices");
     if (!choices.isArr() || choices.arr.empty())
     {
@@ -570,12 +595,10 @@ static bool LlmChatImpl(const LlmSettings& cfg, const std::vector<LlmMsg>& msgs,
         return false;
     }
     const std::string text = choices.arr[0].get("message").get("content").strOr("");
-    if (usage != NULL)
+    if (std::string(choices.arr[0].get("finish_reason").strOr("")) == "length")
     {
-        usage->ms += (long long)std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
-        const jsonlite::Value& u = v.get("usage");
-        usage->tokIn += (long long)u.get("prompt_tokens").numOr(0);
-        usage->tokOut += (long long)u.get("completion_tokens").numOr(0);
+        *err = "回复达到模型输出上限；请降低 Token 节省档位后重试";
+        return false; // Never retry truncated JSON as if it were malformed output.
     }
     *content = text;
     return true;

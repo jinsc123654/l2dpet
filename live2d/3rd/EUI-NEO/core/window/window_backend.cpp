@@ -650,6 +650,18 @@ Handle createWindow(const WindowCreateRequest& request) {
     if (request.windowType != 0 && glfwGetPlatform() == GLFW_PLATFORM_X11 && XInternAtom && XChangeProperty && XFlush) {
         Display* dpy = glfwGetX11Display();
         ::Window xw = glfwGetX11Window(window);
+        // A quick menu is an unmanaged popup, not a second top-level application
+        // window. Some WMs reject activation of a managed POPUP_MENU while our
+        // settings window is already visible/focused.
+        if (request.windowType == 1) {
+            using ChangeAttributesFn = int (*)(Display*, ::Window, unsigned long, XSetWindowAttributes*);
+            const auto changeAttributes = reinterpret_cast<ChangeAttributesFn>(dlsym(x11, "XChangeWindowAttributes"));
+            if (changeAttributes) {
+                XSetWindowAttributes attributes{};
+                attributes.override_redirect = True;
+                changeAttributes(dpy, xw, CWOverrideRedirect, &attributes);
+            }
+        }
         const char* typeName = request.windowType == 1 ? "_NET_WM_WINDOW_TYPE_POPUP_MENU"
                              : request.windowType == 2 ? "_NET_WM_WINDOW_TYPE_TOOLTIP"
                                                        : "_NET_WM_WINDOW_TYPE_UTILITY";
@@ -707,24 +719,19 @@ Handle createWindow(const WindowCreateRequest& request) {
         if (request.windowType != 0 && XRaiseWindowFn && glfwGetPlatform() == GLFW_PLATFORM_X11) {
             XRaiseWindowFn(glfwGetX11Display(), glfwGetX11Window(window));
         }
+        if (request.windowType == 1 && request.focusOnShow && glfwGetPlatform() == GLFW_PLATFORM_X11) {
+            using SetInputFocusFn = int (*)(Display*, ::Window, int, Time);
+            const auto setFocus = x11 ? reinterpret_cast<SetInputFocusFn>(dlsym(x11, "XSetInputFocus")) : nullptr;
+            if (setFocus) {
+                setFocus(glfwGetX11Display(), glfwGetX11Window(window), RevertToParent,
+                         request.userTime ? request.userTime : CurrentTime);
+                if (XFlush) XFlush(glfwGetX11Display());
+            }
+        }
 #endif
 #if defined(GLFW_EXPOSE_NATIVE_X11)
-        // 需要焦点的弹出窗（菜单）：按用户操作时间戳请求激活（_NET_ACTIVE_WINDOW，来源 = 应用）
-        using SendEventFn = int (*)(Display*, ::Window, Bool, long, XEvent*);
-        const auto XSendEvent = x11 ? reinterpret_cast<SendEventFn>(dlsym(x11, "XSendEvent")) : nullptr;
-        if (request.focusOnShow && request.windowType == 1 && request.userTime != 0 && XSendEvent && XInternAtom && XFlush &&
-            glfwGetPlatform() == GLFW_PLATFORM_X11) {
-            Display* dpy = glfwGetX11Display();
-            XEvent ev{};
-            ev.xclient.type = ClientMessage;
-            ev.xclient.window = glfwGetX11Window(window);
-            ev.xclient.message_type = XInternAtom(dpy, "_NET_ACTIVE_WINDOW", False);
-            ev.xclient.format = 32;
-            ev.xclient.data.l[0] = 1;   // 来源：应用
-            ev.xclient.data.l[1] = static_cast<long>(request.userTime);
-            XSendEvent(dpy, DefaultRootWindow(dpy), False, SubstructureRedirectMask | SubstructureNotifyMask, &ev);
-            XFlush(dpy);
-        }
+        // Unmanaged menus take input focus directly above; do not ask the WM
+        // to activate them as a managed application window.
 #endif
     }
     return window;

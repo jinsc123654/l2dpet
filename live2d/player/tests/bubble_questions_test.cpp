@@ -1,5 +1,5 @@
 // Standalone regression test (no Cubism SDK or LLM key required):
-// g++ -std=c++11 -ffunction-sections -fdata-sections live2d/player/tests/bubble_questions_test.cpp -Wl,--gc-sections -pthread -o /tmp/bubble_questions_test
+// g++ -std=c++14 -ffunction-sections -fdata-sections live2d/player/tests/bubble_questions_test.cpp live2d/player/src/PetQuestions.cpp live2d/player/src/Platform.cpp -Wl,--gc-sections -pthread -o /tmp/bubble_questions_test
 #include "../src/PetAgent.cpp"
 #include <cassert>
 #include <iostream>

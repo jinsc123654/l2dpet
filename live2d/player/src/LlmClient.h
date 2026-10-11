@@ -22,6 +22,7 @@ struct LlmSettings
     std::string baseUrl = "https://api.deepseek.com";
     std::string keySource = "none";   // env / file / none（面板显示用，不含 key 本身）
     std::string providerName;         // 生效的供应商名（v2 配置；env 覆盖时为空）
+    int maxReplyTokens = 0;          // Only bounded dialogue requests set this; maintenance retains its budget.
 };
 
 /** 一个 LLM 供应商（v2 配置；一个供应商可挂多个模型，当前用一个） */
@@ -50,6 +51,13 @@ struct LlmUsage
     long long tokIn = 0;
     long long tokOut = 0;
 };
+
+struct LlmTokenStats
+{
+    LlmUsage last;
+    LlmUsage total;
+};
+LlmTokenStats LlmGetTokenStats(); // Process lifetime, includes maintenance and retries; provider-reported usage.
 
 /** 接入参数（env > llm.json > 默认）。 */
 LlmSettings LlmLoadSettings();

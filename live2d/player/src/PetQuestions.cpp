@@ -8,6 +8,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <cstdint>
+#include <algorithm>
+#include <cctype>
 
 #include "Platform.h"
 
@@ -129,28 +132,38 @@ std::string NormPunct(const std::string& s)
     return o;
 }
 
-/** 前 n 个 UTF-8 码点的字节长度（不足 n 个返回 npos） */
-size_t Utf8PrefixBytes(const std::string& s, size_t n)
+std::string QuestionIntent(const std::string& text)
 {
-    size_t i = 0;
-    for (size_t k = 0; k < n; ++k)
-    {
-        if (i >= s.size()) return std::string::npos;
-        const unsigned char c = (unsigned char)s[i];
-        i += c < 0x80 ? 1 : ((c & 0xE0) == 0xC0 ? 2 : ((c & 0xF0) == 0xE0 ? 3 : 4));
-    }
-    return i <= s.size() ? i : std::string::npos;
+    std::string s = NormPunct(text);
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+    const auto has = [&](const char* t) { return s.find(t) != std::string::npos; };
+    if (has("未来") || has("以后") || has("想做") || has("freetime") || has("forfun") || has("hobby")) return "";
+    if ((has("平时") && (has("做什么") || has("干什么") || has("忙什么")))
+        || has("职业") || (has("工作") && (has("上学") || has("学习") || has("学生")))
+        || has("whatdoyoudo") || has("occupation") || (has("work") && has("study"))
+        || has("職業") || (has("仕事") && has("学校"))) return "occupation";
+    return "";
 }
 
-/** 问题文本相似判定：去空白/标点后互相包含，或前 6 个字相同 */
+std::string QuestionId(const std::string& q)
+{
+    const std::string intent = QuestionIntent(q);
+    const std::string key = intent.empty() ? NormPunct(q) : intent;
+    uint64_t hash = UINT64_C(14695981039346656037);
+    for (unsigned char c : key) { hash ^= c; hash *= UINT64_C(1099511628211); }
+    char id[24];
+    snprintf(id, sizeof(id), "q_%016llx", (unsigned long long)hash);
+    return id;
+}
+
 bool SameQ(const std::string& a, const std::string& b)
 {
     if (a.empty() || b.empty()) return false;
     const std::string x = NormPunct(a), y = NormPunct(b);
     if (x.empty() || y.empty()) return false;
     if (x.find(y) != std::string::npos || y.find(x) != std::string::npos) return true;
-    const size_t nx = Utf8PrefixBytes(x, 6), ny = Utf8PrefixBytes(y, 6);
-    return nx != std::string::npos && nx == ny && x.compare(0, nx, y, 0, ny) == 0;
+    const std::string intent = QuestionIntent(a);
+    return !intent.empty() && intent == QuestionIntent(b);
 }
 
 const char* kGenSystem =
@@ -188,6 +201,10 @@ bool PetQuestions::Load(const std::string& fp)
         Item one;
         one.topic = Str(it, "topic");
         one.q = Str(it, "q");
+        one.id = Str(it, "id");
+        if (one.id.size() != 18 || one.id.compare(0, 2, "q_") != 0
+            || !std::all_of(one.id.begin() + 2, one.id.end(), [](unsigned char c) { return std::isxdigit(c) != 0; }))
+            one.id = QuestionId(one.q);
         one.answer = Str(it, "answer");
         one.at = Str(it, "at");
         if (const jsonlite::Value* a = Field(it, "asked")) one.asked = (int)a->numOr(0.0);
@@ -216,6 +233,7 @@ bool PetQuestions::Save(std::string* err) const
         const Item& it = _items[i];
         if (i) o += ",";
         o += "{\"topic\":\"" + JsonEsc(it.topic) + "\",\"q\":\"" + JsonEsc(it.q) + "\"";
+        o += ",\"id\":\"" + JsonEsc(it.id) + "\"";
         o += ",\"options\":" + StrArr(it.options);
         o += ",\"asked\":" + std::to_string(it.asked);
         if (!it.answer.empty()) o += ",\"answer\":\"" + JsonEsc(it.answer) + "\",\"at\":\"" + JsonEsc(it.at) + "\"";
@@ -291,28 +309,31 @@ bool PetQuestions::Generate(const std::string& fp, const std::string& modelName,
         }
         if (one.options.size() < 2) continue;   // 选择题至少要两个选项
         one.q = CutUtf8(StripStamps(one.q), 80);
-        // 旧库里同一题：继承 asked/answer
+        one.id = QuestionId(one.q);
+        // Merge all matching legacy records; an unanswered duplicate must not hide a saved answer.
+        bool inheritedId = false;
         for (size_t k = 0; k < old.size(); ++k)
         {
             if (SameQ(old[k].q, one.q))
             {
-                one.asked = old[k].asked;
-                one.answer = old[k].answer;
-                one.at = old[k].at;
-                break;
+                if (!inheritedId && !old[k].id.empty()) { one.id = old[k].id; inheritedId = true; }
+                one.asked = std::max(one.asked, old[k].asked);
+                if (!old[k].answer.empty()) { one.answer = old[k].answer; one.at = old[k].at; }
             }
         }
-        fresh.push_back(one);
+        bool duplicate = false;
+        for (const Item& existing : fresh) duplicate = duplicate || SameQ(existing.q, one.q);
+        if (!duplicate) fresh.push_back(one);
     }
     if (fresh.empty())
     {
         if (err != NULL) *err = "题库没有可用题目";
         return false;
     }
-    // 已答过的旧题（这轮没重出）也带回来，免得答案丢了
+    // 问过的旧题（这轮没重出）也带回来，避免未回答历史丢失
     for (size_t k = 0; k < old.size(); ++k)
     {
-        if (old[k].answer.empty()) continue;
+        if (old[k].answer.empty() && old[k].asked == 0) continue;
         bool has = false;
         for (size_t i = 0; i < fresh.size() && !has; ++i) has = SameQ(fresh[i].q, old[k].q);
         if (!has) fresh.push_back(old[k]);
@@ -348,17 +369,12 @@ bool PetQuestions::Stale(double maxAgeSec) const
 std::vector<const PetQuestions::Item*> PetQuestions::Fresh(size_t n) const
 {
     std::vector<const Item*> out;
-    // 第一轮：没问过也没答过的；第二轮：问过但没答的（可以换个方式再问一次）
-    for (int pass = 0; pass < 2 && out.size() < n; ++pass)
+    // Never recycle unanswered questions; regenerated banks preserve asked history.
+    for (size_t i = 0; i < _items.size() && out.size() < n; ++i)
     {
-        for (size_t i = 0; i < _items.size() && out.size() < n; ++i)
-        {
-            const Item& it = _items[i];
-            if (!it.answer.empty()) continue;
-            if (pass == 0 && it.asked > 0) continue;
-            if (pass == 1 && it.asked == 0) continue;
-            out.push_back(&it);
-        }
+        const Item& it = _items[i];
+        if (!it.answer.empty() || it.asked > 0 || AlreadyAsked(it.q)) continue;
+        out.push_back(&it);
     }
     return out;
 }
@@ -380,6 +396,7 @@ void PetQuestions::MarkAsked(const std::string& q, const std::vector<std::string
     {
         Item one;
         one.q = CutUtf8(q, 80);
+        one.id = QuestionId(one.q);
         one.topic = "自创";
         one.options = options;
         one.asked = 1;
@@ -397,6 +414,7 @@ void PetQuestions::MarkAnswered(const std::string& q, const std::string& label)
     {
         Item one;
         one.q = CutUtf8(q.empty() ? std::string("（没记下问题）") : q, 80);
+        one.id = QuestionId(one.q);
         one.topic = "自创";
         one.asked = 1;
         one.answer = CutUtf8(label, 40);
@@ -422,6 +440,13 @@ std::string PetQuestions::KnownText() const
         else o += "（问过没答）";
     }
     return o;
+}
+
+bool PetQuestions::AlreadyAsked(const std::string& q) const
+{
+    for (const Item& item : _items)
+        if ((item.asked > 0 || !item.answer.empty()) && SameQ(item.q, q)) return true;
+    return false;
 }
 
 std::string PetQuestions::Summary() const

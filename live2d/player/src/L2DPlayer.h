@@ -2114,6 +2114,7 @@ public:
             // 窗口位置（拖动/缩放后由桌宠端口自动保存；-1 = 没存过 → 默认贴工作区左下角）
             { "pos_l", -1, -1, 20000, "窗口左边 x（像素）" }, { "pos_b", -1, -1, 20000, "窗口底边距屏幕底（像素）" },
             { "llm_idle", 1, 0, 1, "LLM 闲时表演" },        { "llm_period", 60, 20, 600, "闲时表演间隔（秒）" },
+            { "llm_token_tier", 1, 0, 3, "Token 节省档位" },
             { "llm_questions", 1, 0, 1, "LLM 可以提问" },
             // 连续工作多久提醒一次（分钟；0 = 关）；天气闲聊（0/1，位置在字符串配置 weather_loc）
             { "work_remind", 60, 0, 240, "连续工作提醒（分钟，0=关）" },
@@ -2387,6 +2388,11 @@ public:
                  _llmCalls, _llmErrors, _llmQuestions, _llmTokIn, _llmTokOut,
                  _llmCalls > 0 ? _llmMsSum / (double)_llmCalls : 0.0);
         std::string o = b;
+        const l2d::LlmTokenStats tokens = l2d::LlmGetTokenStats();
+        o += ",\"last_tok_in\":" + std::to_string(tokens.last.tokIn)
+            + ",\"last_tok_out\":" + std::to_string(tokens.last.tokOut)
+            + ",\"session_tok_in\":" + std::to_string(tokens.total.tokIn)
+            + ",\"session_tok_out\":" + std::to_string(tokens.total.tokOut);
         o += ",\"kinds\":{";
         bool first = true;
         for (std::map<std::string, long>::const_iterator it = _llmKinds.begin(); it != _llmKinds.end(); ++it)

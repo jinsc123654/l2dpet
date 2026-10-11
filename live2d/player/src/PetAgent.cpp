@@ -6,6 +6,7 @@
 #include "PetSpeech.h"
 #include "PetVerbs.h"
 #include "Platform.h"
+#include "TokenBudget.h"
 
 #include <cmath>
 #include <cstdio>
@@ -335,7 +336,8 @@ std::string QuestionTextKey(const std::string& text)
     return out;
 }
 
-void RestoreQuestionOptions(jsonlite::Value* seq, const std::vector<const PetQuestions::Item*>& candidates)
+void RestoreQuestionOptions(jsonlite::Value* seq, const std::vector<const PetQuestions::Item*>& candidates,
+                            const PetQuestions* questions = NULL)
 {
     jsonlite::Value* steps = ObjGetMut(seq, "steps");
     if (steps == NULL || !steps->isArr()) return;
@@ -346,7 +348,12 @@ void RestoreQuestionOptions(jsonlite::Value* seq, const std::vector<const PetQue
         const std::string speech = GetStr(&step, "speak");
         if (speech.empty()) continue;
         const PetQuestions::Item* selected = NULL;
-        if (id.isNum() && id.num >= 1 && id.num <= candidates.size() && std::floor(id.num) == id.num)
+        if (id.isStr())
+        {
+            for (const PetQuestions::Item* item : candidates)
+                if (!item->id.empty() && item->id == id.str) selected = item;
+        }
+        else if (id.isNum() && id.num >= 1 && id.num <= candidates.size() && std::floor(id.num) == id.num)
             selected = candidates[(size_t)id.num - 1];
         else
         {
@@ -362,6 +369,25 @@ void RestoreQuestionOptions(jsonlite::Value* seq, const std::vector<const PetQue
             }
         }
         const jsonlite::Value& opts = step.get("options");
+        if (questions != NULL)
+        {
+            const bool questionLike = opts.isArr() || id.isStr() || id.isNum()
+                || speech.find("?") != std::string::npos || speech.find("？") != std::string::npos;
+            if (questions->AlreadyAsked(speech)
+                || (questionLike && (selected == NULL || selected->asked > 0 || !selected->answer.empty())))
+            {
+                ObjDel(&step, "speak");
+                ObjDel(&step, "options");
+                continue; // Keep unrelated animations, never show an untracked or repeated question.
+            }
+            if (selected != NULL)
+            {
+                jsonlite::Value canonical;
+                canonical.setType(jsonlite::Value::STR);
+                canonical.str = selected->q;
+                ObjSet(&step, "speak", canonical); // Record and answer the same canonical question, despite paraphrasing.
+            }
+        }
         size_t valid = 0;
         for (size_t i = 0; opts.isArr() && i < opts.arr.size(); ++i)
         {
@@ -541,12 +567,13 @@ std::string PetAgent::Rpc(const std::string& line)
 }
 
 // 题库该不该重来（定义在下面 OpenQuestions 附近；Run 里也要用，故先声明）
-static bool QuestionsNeedRefresh(const PetQuestions& q);
+static bool QuestionsNeedRefresh(const PetQuestions& q, int tokenTier = 1);
 // 笑话补货最小间隔（定义在下面 OpenJokes 附近；Run 里也要用）
 static double JokeGapSec();
 
 void PetAgent::Run()
 {
+    _weatherCadence.Reset(NowSec());
     srand((unsigned)time(NULL));
     if (!LoadCaps())
     {
@@ -657,7 +684,7 @@ void PetAgent::Run()
             if (NowSec() - qCheckAt >= 300.0 && !_questions.Empty())
             {
                 qCheckAt = NowSec();
-                if (QuestionsNeedRefresh(_questions) && _questions.AnsweredCount() > 0) OpenQuestions(false);
+                if (QuestionsNeedRefresh(_questions, _cfgTokenTier) && _questions.Stale(300.0)) OpenQuestions(false);
             }
             // 笑话池补货：没讲过的少于 2 条、且距上次生成够久（L2D_JOKE_GAP_SEC 可覆盖，测试用）
             static double jCheckAt = NowSec();   // 从启动时算起（启动时已经各做过一次）
@@ -1009,6 +1036,15 @@ void PetAgent::Run()
             _backlog[0].clear();
             _backlog[1].clear();
         }
+        bool scheduledWeather = false;
+        if (interrupt.empty() && !sleepy && nowB >= _awaitingUntil
+            && _backlog[0].empty() && _backlog[1].empty() && _cfgWeather
+            && _weatherCadence.Due(nowB) && _weather.Fresh(_cfgWeatherLoc, (double)time(NULL)))
+        {
+            scheduledWeather = true;
+            interrupt = "【天气闲聊】结合刚查询的天气，必须自然地说一句贴近主人生活的天气关心；"
+                        "不要只做动作，不要提问，不要重复播报，不要虚构天气。";
+        }
         if (interrupt.empty() && (sleepy || !_cfgLlmIdle)) _nextAt = std::max(_nextAt, nowB + 10.0);
         if (interrupt.empty() && (nowB < _nextAt || nowB < _awaitingUntil || !_backlog[0].empty() || !_backlog[1].empty()
                                   || sleepy || !_cfgLlmIdle))
@@ -1048,14 +1084,6 @@ void PetAgent::Run()
             ambient.push_back("用户的鼠标刚在你的" + _lastHover + "附近");
             _lastHover.clear();
         }
-        // 只在真正闲时偶尔提天气；触摸、选项、陪伴等交互不插入天气话题。
-        if (_cfgWeather && _cfgLlmIdle && StartsWith(interrupt.c_str(), "【闲时】")
-            && _weather.Fresh(_cfgWeatherLoc, (double)time(NULL))
-            && (_lastWeatherIdleAt == 0.0 || nowB - _lastWeatherIdleAt >= 3600.0))
-        {
-            _lastWeatherIdleAt = nowB;
-            ambient.push_back("【天气闲聊】可以结合查询结果偶尔关心主人一句，不要反复播报天气，也不要每次都提醒穿衣或带伞。");
-        }
         ++_segN;
         std::string note = "第 " + std::to_string(_segN) + " 段。" + MoodText() + interrupt;
         if (!ambient.empty())
@@ -1080,12 +1108,13 @@ void PetAgent::Run()
             note += "上一段的警告：" + w + "，请避免。";
         }
         const std::string kind = Contains(interrupt.c_str(), "选项里选了") ? "续戏"
-                               : (StartsWith(interrupt.c_str(), "【天气】") ? "天气"
+                               : (StartsWith(interrupt.c_str(), "【天气】") || scheduledWeather ? "天气"
                                   : (StartsWith(interrupt.c_str(), "【回应】") ? "回应"
                                      : (StartsWith(interrupt.c_str(), "【重逢】") ? "重逢" : "闲时")));
         const l2d::LlmSettings cfgNow = l2d::LlmLoadSettings();
         if (cfgNow.key.empty())
         {
+            if (scheduledWeather) _weatherCadence.RetryLater(nowB);
             _nextAt = NowSec() + 10.0;
             continue;
         }
@@ -1096,6 +1125,7 @@ void PetAgent::Run()
         const std::string memCtx = _mem != NULL ? StripStamps(_mem->Context(interrupt, [this](const std::string& z) { return ZoneCn(z); })) : "";
         if (!LlmSequence(note, memCtx, &seq, &llmErr))
         {
+            if (scheduledWeather) _weatherCadence.RetryLater(NowSec());
             Log("LLM 调用失败：" + llmErr);
             Report(kind, note, NULL, false, llmErr, false, 0);
             _lastLlmAt = NowSec();
@@ -1116,7 +1146,7 @@ void PetAgent::Run()
         _choiceDid = false;   // 只管紧接着的这一段
         snprintf(msg, sizeof(msg), "%s段，LLM 用时 %.1fs", responding ? "回应" : "闲时", _lastLlmAt - t0);
         Log(msg);
-        RestoreQuestionOptions(&seq, questionCandidates);
+        RestoreQuestionOptions(&seq, questionCandidates, &_questions);
         // 台词去日期/时间戳（兜底：提示词里已要求不写）
         if (jsonlite::Value* steps = ObjGetMut(&seq, "steps"))
         {
@@ -1172,6 +1202,11 @@ void PetAgent::Run()
             }
         }
         const bool ok = GetNum(&reply, "ok", 0) != 0;
+        if (scheduledWeather)
+        {
+            if (ok && !SummarizeSay(seq).empty()) _weatherCadence.Delivered(NowSec());
+            else _weatherCadence.RetryLater(NowSec());
+        }
         _lastWarn.clear();
         const jsonlite::Value* warns = ObjGet(&reply, "warnings");
         if (warns != NULL && warns->isArr())
@@ -1325,9 +1360,14 @@ void PetAgent::ApplyMood(const jsonlite::Value* mood)
 
 void PetAgent::ApplyConfig(const jsonlite::Value* cfg)
 {
-    _cfgLlmIdle = GetNum(cfg, "llm_idle", 1) > 0.5;
+    const int oldTier = _cfgTokenTier;
+    _cfgTokenTier = l2d::TokenTier(GetNum(cfg, "llm_token_tier", 1));
+    const l2d::TokenBudget budget = l2d::BudgetForTier(_cfgTokenTier);
+    _cfgLlmIdle = GetNum(cfg, "llm_idle", 1) > 0.5 && budget.idleEnabled;
     _cfgIdlePeriod = GetNum(cfg, "llm_period", kIdlePeriodDefault);
     if (_cfgIdlePeriod <= 0) _cfgIdlePeriod = kIdlePeriodDefault;
+    _cfgIdlePeriod *= budget.idleMultiplier;
+    if (_cfgTokenTier != oldTier) _nextAt = NowSec() + _cfgIdlePeriod;
     _cfgLlmQuestions = GetNum(cfg, "llm_questions", 1) > 0.5;
     _cfgWeather = GetNum(cfg, "weather", 0) > 0.5;
     _cfgWeatherLoc.clear();
@@ -1635,14 +1675,11 @@ void PetAgent::PushPersona()
 
 // ---------------------------------------------------------------- 问题库（想了解主人的问题）
 
-/** 题库什么时候该重来：没有 / 太旧（>24h）/ 没答过的题不够了（<3）/ 答够 5 题（该换新题材了） */
-static bool QuestionsNeedRefresh(const PetQuestions& q){
+/** Savings tiers refill only on exhaustion; Full retains proactive refill/24h renewal. */
+static bool QuestionsNeedRefresh(const PetQuestions& q, int tokenTier){
     if (q.Empty()) return true;
-    if (q.Stale(24.0 * 3600.0)) return true;
-    if (q.Fresh(3).size() < 3) return true;
-    // （原来还有一条 AnsweredCount()>=5：那是**累计**答题数，答过 5 题以后永远为真 →
-    //  每次启动、每 5 分钟都重新生成一批，白花 LLM 调用。"新鲜题不够"已经覆盖了本意）
-    return false;
+    if (q.Fresh(1).empty()) return true;
+    return tokenTier == 0 && (q.Fresh(3).size() < 3 || q.Stale(24.0 * 3600.0));
 }
 
 void PetAgent::OpenQuestions(bool regen)
@@ -1650,7 +1687,7 @@ void PetAgent::OpenQuestions(bool regen)
     const std::string fp = _caps.modelFv;
     _questions.Reset();
     const bool loaded = _questions.Load(fp);
-    if (loaded && !regen && !QuestionsNeedRefresh(_questions))
+    if (loaded && !regen && !QuestionsNeedRefresh(_questions, _cfgTokenTier))
     {
         Log("问题库（已缓存）：" + _questions.Summary());
         return;
@@ -1835,12 +1872,12 @@ std::string PetAgent::AskCandidatesNote(const std::vector<const PetQuestions::It
     if (cands.empty()) return std::string();
     std::string o = "（这段可以用一句台词 + options 问主人一个问题，用来更了解他；**从下面挑一个最贴合当前气氛的**，"
                     "可以按你的口吻微调措辞、选项照抄或略改；不要问成是非题；问完这段就别再说别的。"
-                    "选择候选题时，在同一个 speak 步骤里必须写 question_id（下面的题号，数字）和 options 数组，"
-                    "例如 {\"at\":0,\"speak\":\"问题台词\",\"question_id\":1,\"options\":[\"选项一\",\"选项二\"]}；"
+                    "只能选择候选题，不能自创问题；在同一个 speak 步骤里必须写 question_id（下面的稳定 ID，字符串）和 options 数组，"
+                    "例如 {\"at\":0,\"speak\":\"问题台词\",\"question_id\":\"q_…\",\"options\":[\"选项一\",\"选项二\"]}；"
                     "只写问句不会产生可点击的按钮。候选题：\n";
     for (size_t i = 0; i < cands.size(); ++i)
     {
-        o += "  " + std::to_string(i + 1) + ") " + cands[i]->q + " 选项：";
+        o += "  " + cands[i]->id + ") " + cands[i]->q + " 选项：";
         for (size_t k = 0; k < cands[i]->options.size(); ++k)
         {
             o += (k ? "/" : "") + cands[i]->options[k];
@@ -1850,7 +1887,7 @@ std::string PetAgent::AskCandidatesNote(const std::vector<const PetQuestions::It
     const std::string known = _questions.KnownText();
     if (!known.empty())
     {
-        o += "  已经知道/问过的别再问：" + (Utf8Len(known) > 200 ? plat::Utf8Head(known, 200) + "…" : known) + "\n";
+        o += "  已经知道/问过的别再问：" + known + "\n";
     }
     o += "  如果当下气氛不适合提问，就不问。）";
     return o;
@@ -2165,7 +2202,7 @@ void PetAgent::ClearRoleContext(const std::string& why)
     _backlog[0].clear();
     _backlog[1].clear();
     _lastHover.clear();
-    _lastWeatherIdleAt = 0.0;
+    _weatherCadence.Reset(NowSec());
     ResetConversation(why);
 }
 
@@ -2207,7 +2244,9 @@ bool PetAgent::PersonaStaleLang() const
 
 bool PetAgent::LlmSequence(const std::string& note, const std::string& memory, jsonlite::Value* seqOut, std::string* err)
 {
-    const l2d::LlmSettings cfg = l2d::LlmLoadSettings();
+    l2d::LlmSettings cfg = l2d::LlmLoadSettings();
+    const l2d::TokenBudget budget = l2d::BudgetForTier(_cfgTokenTier);
+    cfg.maxReplyTokens = budget.replyTokens;
     std::vector<l2d::LlmMsg> msgs;
     {
         l2d::LlmMsg sys;
@@ -2219,6 +2258,14 @@ bool PetAgent::LlmSequence(const std::string& note, const std::string& memory, j
         const size_t m = sys.content.find("{model}");
         if (m != std::string::npos) sys.content.replace(m, 7, _caps.modelFv);
         msgs.push_back(sys);
+    }
+    if (_cfgTokenTier > 0)
+    {
+        l2d::LlmMsg concise;
+        concise.role = "system";
+        concise.content = "保持要求的 JSON 格式，最多 " + std::to_string(budget.steps)
+            + " 个 steps；台词简短自然，不重复背景说明。保留当前问题的必要回答。";
+        msgs.push_back(concise);
     }
     if (!memory.empty())
     {
@@ -2245,7 +2292,8 @@ bool PetAgent::LlmSequence(const std::string& note, const std::string& memory, j
         ResetConversation("上下文语言与当前语言不一致");
     }
     if (_history.empty()) _historyLang = LangResolve(_cfgLang);
-    for (size_t i = _history.size() > 6 ? _history.size() - 6 : 0; i < _history.size(); ++i)
+    const size_t keep = (size_t)budget.historyMessages;
+    for (size_t i = _history.size() > keep ? _history.size() - keep : 0; i < _history.size(); ++i)
     {
         msgs.push_back(_history[i]);
     }

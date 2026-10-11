@@ -2302,6 +2302,27 @@ void PageLLM(Pen& p)
     p.y += 14.0f + chipH + 14.0f + (cur != nullptr ? 3 * 60.0f + 52.0f + 40.0f + std::max(1.0f, (float)cur->models.size()) * 40.0f + 14.0f + 52.0f + 30.0f : 60.0f);
     p.y += 22.0f;
 
+    Section(p, "sec.tokens", "Token 节省");
+    const int tier = std::max(0, std::min(3, (int)std::lround(Cfg("llm_token_tier", 1))));
+    const char* tokenHints[] = {
+        "完整：最近 6 条消息，按原间隔互动，回复使用供应商默认上限。",
+        "均衡：最近 4 条消息，小剧场间隔 ×1.5，回复上限 1536 Token。",
+        "节省：最近 2 条消息，小剧场间隔 ×3，回复上限 1024 Token。",
+        "极省：仅当前问题，关闭自动小剧场，回复上限 768 Token。"
+    };
+    const std::string tokenHint = i18n::T(tokenHints[tier]);
+    const std::string tokenNote = i18n::T("不删除已保存的记忆；性格、台词库和记忆整理保留独立预算。完整档可提前补题，其余档题库问完再更新。实际节省量取决于使用情况。");
+    const float tokenHintH = TextH(tokenHint, p.w - 36.0f, 12.5f, 20.0f);
+    const float tokenNoteH = TextH(tokenNote, p.w - 36.0f, 12.5f, 20.0f);
+    Card(p.ui, "tokens.card", p.x, p.y, p.w, SliderH(p.w) + tokenHintH + tokenNoteH + 24.0f);
+    SliderRow(p, "s.tokens", "节省档位", "llm_token_tier", 0.0f, 3.0f, 1.0f, [](float v) {
+        const char* names[] = { "完整", "均衡", "节省", "极省" };
+        return i18n::T(names[std::max(0, std::min(3, (int)std::lround(v)))]);
+    });
+    Text(p.ui, "tokens.hint", p.x + 18.0f, p.y + 4.0f, p.w - 36.0f, tokenHintH, tokenHint, 12.5f, kMuted, 400, true);
+    Text(p.ui, "tokens.note", p.x + 18.0f, p.y + tokenHintH + 10.0f, p.w - 36.0f, tokenNoteH, tokenNote, 12.5f, kMuted, 400, true);
+    p.y += tokenHintH + tokenNoteH + 46.0f;
+
     Section(p, "sec.part", "参与度");
     Card(p.ui, "part.card", p.x, p.y, p.w, 2 * ToggleH() + SliderH(p.w));
     ToggleRow(p, "t.idle", "闲时小剧场", "没人互动时，LLM 偶尔安排一段小日常", "llm_idle");
@@ -2327,12 +2348,19 @@ void PageLLM(Pen& p)
                                       std::to_string((int)stt.get("tok_out").numOr(0)),
                                       Num1(stt.get("avg_ms").numOr(0) / 1000.0) });
     const float th = TextH(l1, p.w - 36.0f, 14.0f, 20.0f);
-    Card(p.ui, "stat.card", p.x, p.y, p.w, th + 92.0f);
+    const std::string tokenStats = i18n::TF("最近一次 {}→{} Token · 本次运行对话与维护累计 {}→{} Token",
+        { std::to_string((long long)stt.get("last_tok_in").numOr(0)),
+          std::to_string((long long)stt.get("last_tok_out").numOr(0)),
+          std::to_string((long long)stt.get("session_tok_in").numOr(0)),
+          std::to_string((long long)stt.get("session_tok_out").numOr(0)) });
+    const float tokenStatsH = TextH(tokenStats, p.w - 36.0f, 12.5f, 20.0f);
+    Card(p.ui, "stat.card", p.x, p.y, p.w, th + tokenStatsH + 100.0f);
     Text(p.ui, "stat.l1", p.x + 18.0f, p.y + 14.0f, p.w - 36.0f, th, l1, 14.0f, kText, 500, true);
     Text(p.ui, "stat.l2", p.x + 18.0f, p.y + 18.0f + th, p.w - 36.0f, 20.0f, l2, 12.5f, (int)stt.get("errors").numOr(0) > 0 ? kDanger : kMuted);
-    components::button(p.ui, "b.log").theme(Th(), false).position(p.x + 18.0f, p.y + th + 44.0f).size(120.0f, 36.0f)
+    Text(p.ui, "stat.tokens", p.x + 18.0f, p.y + th + 42.0f, p.w - 36.0f, tokenStatsH, tokenStats, 12.5f, kMuted, 400, true);
+    components::button(p.ui, "b.log").theme(Th(), false).position(p.x + 18.0f, p.y + th + tokenStatsH + 52.0f).size(120.0f, 36.0f)
         .text(i18n::T("交互日志 ›")).fontSize(14.0f).onClick([] { S.page = P_LOG; S.scroll[P_LOG].set(0.0f); }).build();
-    p.y += th + 92.0f + 20.0f;
+    p.y += th + tokenStatsH + 120.0f;
 }
 
 void PageLog(Pen& p)
@@ -2849,92 +2877,28 @@ std::vector<MItem> MenuItems()
     auto add = [&](int k, const std::string& l, const std::string& c = "", int sub = 0, bool chk = false) {
         v.push_back(MItem{ k, l, c, sub, chk });
     };
-    if (S.menuLevel == 0)
-    {
-        add(MI_HEADER, PetDisplayName() + " · " + StateZh(st) + " · "
-                       + EmotionZh(mood.get("emotion").get("name").strOr("neutral")));
-        add(MI_PREFS, "状态与设置…", "", P_STATUS);
-        add(MI_SEP, "");
-        if (st == "asleep" || st == "drowsy")
-        {
-            add(MI_ACTION, "叫醒她", "{\"cmd\":\"mood\",\"state\":\"awake\"}");
-        }
-        else
-        {
-            add(MI_ACTION, "摸摸头", "{\"cmd\":\"touch\",\"zone\":\"head\",\"kind\":\"rub\"}");
-            if (st == "sulk") add(MI_ACTION, "哄哄她", "{\"cmd\":\"touch\",\"zone\":\"head\",\"kind\":\"rub\"}");
-            add(MI_ACTION, "哄她睡觉", "{\"cmd\":\"mood\",\"state\":\"drowsy\"}");
-        }
-        add(MI_SUB, "表情", "", 1);
-        add(MI_SUB, "动作", "", 2);
-        if (S.st.get("models").arr.size() > 1) add(MI_SUB, "模型", "", 5);
-        add(MI_SUB, "外观", "", 6);
-        add(MI_SEP, "");
-        add(MI_ACTION, "讲个笑话", "{\"cmd\":\"joke\"}");
-        add(MI_ACTION, "猜拳！", "{\"cmd\":\"game\",\"kind\":\"rps\"}");
-        if (Cfg("weather", 0) > 0.5f) add(MI_ACTION, "聊聊天气", "{\"cmd\":\"weather\"}");
-        add(MI_SEP, "");
-        add(MI_TOGGLE, "总在最前", "top", 0, Cfg("top", 1) > 0.5f);
-        add(MI_TOGGLE, "鼠标穿透", "passthrough", 0, Cfg("passthrough", 0) > 0.5f);
-        add(MI_TOGGLE, "锁定大小和位置", "lock", 0, Cfg("lock", 0) > 0.5f);
-        add(MI_SUB, "大小", "", 3);
-        add(MI_SUB, "不透明度", "", 4);
-        add(MI_SEP, "");
-        add(MI_HIDE, "隐藏到托盘");
-        add(MI_QUIT, "退出");
-    }
-    else if (S.menuLevel == 1)
-    {
-        add(MI_BACK, "返回");
-        const std::string cur = S.st.get("expression").strOr("");
-        add(MI_ACTION, "（无表情）", "{\"cmd\":\"expression\",\"fv\":null}", 0, cur.empty());
-        for (const Value& e : S.st.get("expressions").arr)
-            add(MI_ACTION, e.str, "{\"cmd\":\"expression\",\"fv\":" + JStr("exp:" + e.str) + "}", 0, e.str == cur);
-    }
-    else if (S.menuLevel == 2)
-    {
-        add(MI_BACK, "返回");
-        for (const Value& a : S.st.get("actions").arr)
-            if (a.isArr() && a.arr.size() >= 2)
-                add(MI_ACTION, a.arr[1].str, "{\"cmd\":\"action\",\"fv\":" + JStr("act:" + a.arr[0].str) + "}");
-    }
-    else if (S.menuLevel == 3 || S.menuLevel == 4)
-    {
-        add(MI_BACK, "返回");
-        const bool zoom = S.menuLevel == 3;
-        const float cur = zoom ? Cfg("zoom", 1) : Cfg("opacity", 1);
-        static const int z[] = { 60, 70, 80, 90, 100, 110, 125, 150, 175, 200 };
-        static const int o[] = { 30, 40, 50, 60, 70, 80, 90, 100 };
-        const int* vals = zoom ? z : o;
-        const int n = zoom ? 10 : 8;
-        for (int i = 0; i < n; ++i)
-        {
-            const float f = vals[i] / 100.0f;
-            add(MI_ACTION, std::to_string(vals[i]) + "%",
-                "{\"cmd\":\"config\",\"set\":{\"" + std::string(zoom ? "zoom" : "opacity") + "\":" + Num(f) + "}}", 0,
-                std::fabs(cur - f) < 0.026f);
-        }
-    }
-    else if (S.menuLevel == 5)
-    {
-        add(MI_BACK, "返回");
-        const int cur = (int)S.st.get("model_index").numOr(0);
-        const Value& ms = S.st.get("models");
-        for (size_t i = 0; i < ms.arr.size(); ++i)
-            add(MI_ACTION, ms.arr[i].str, "{\"cmd\":\"model\",\"index\":" + std::to_string(i) + "}", 0, (int)i == cur);
-    }
-    else if (S.menuLevel == 6)   // 外观：主题 + 语言（面板自己的偏好，不走协议命令）
-    {
-        add(MI_BACK, "返回");
-        add(MI_PREF, "日间", "theme:light", 0, S.themeMode == THEME_LIGHT);
-        add(MI_PREF, "夜间", "theme:dark", 0, S.themeMode == THEME_DARK);
-        add(MI_PREF, "跟随时间", "theme:auto", 0, S.themeMode == THEME_AUTO);
-        add(MI_SEP, "");
-        add(MI_PREF, "中文", "lang:zh", 0, S.langCode == "zh");
-        add(MI_PREF, "English", "lang:en", 0, S.langCode == "en");
-        add(MI_PREF, "日本語", "lang:ja", 0, S.langCode == "ja");
-        add(MI_PREF, "跟随系统", "lang:auto", 0, S.langCode == "auto");
-    }
+    add(MI_HEADER, PetDisplayName() + " · " + StateZh(st) + " · "
+                   + EmotionZh(mood.get("emotion").get("name").strOr("neutral")));
+    add(MI_PREFS, "状态与设置…", "", P_STATUS);
+    add(MI_SEP, "");
+    if (st == "asleep" || st == "drowsy")
+        add(MI_ACTION, "叫醒她", "{\"cmd\":\"mood\",\"state\":\"awake\"}");
+    add(MI_ACTION, "摸摸头", "{\"cmd\":\"touch\",\"zone\":\"head\",\"kind\":\"rub\"}");
+    add(MI_ACTION, "牵手", "{\"cmd\":\"touch\",\"zone\":\"hand.r\",\"kind\":\"click\"}");
+    add(MI_ACTION, "逗她开心", "{\"cmd\":\"emotion\",\"name\":\"happy\",\"intensity\":0.8}");
+    add(MI_ACTION, "捏捏脸", "{\"cmd\":\"touch\",\"zone\":\"face\",\"kind\":\"click\"}");
+    if (st == "sulk") add(MI_ACTION, "哄哄她", "{\"cmd\":\"touch\",\"zone\":\"head\",\"kind\":\"rub\"}");
+    if (st != "asleep" && st != "drowsy")
+        add(MI_ACTION, "哄她睡觉", "{\"cmd\":\"mood\",\"state\":\"drowsy\"}");
+    add(MI_SEP, "");
+    add(MI_ACTION, "讲个笑话", "{\"cmd\":\"joke\"}");
+    add(MI_ACTION, "猜拳！", "{\"cmd\":\"game\",\"kind\":\"rps\"}");
+    if (Cfg("weather", 0) > 0.5f) add(MI_ACTION, "聊聊天气", "{\"cmd\":\"weather\"}");
+    add(MI_SEP, "");
+    add(MI_TOGGLE, "锁定大小和位置", "lock", 0, Cfg("lock", 0) > 0.5f);
+    add(MI_TOGGLE, "鼠标穿透", "passthrough", 0, Cfg("passthrough", 0) > 0.5f);
+    add(MI_HIDE, "隐藏到托盘");
+    add(MI_QUIT, "退出");
     return v;
 }
 

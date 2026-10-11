@@ -21,6 +21,7 @@
 
 #include "JsonLite.h"
 #include "LlmClient.h"
+#include "WeatherCadence.h"
 #include "PetJokes.h"
 #include "PetMemory.h"
 #include "PetPersona.h"
@@ -123,8 +124,9 @@ private:
     double _moodEmoIntensity = 0.0, _moodAffection = 0.3, _moodAnnoy = 0.0, _moodLonely = 0.0;
     double _cfgIdlePeriod = 60.0;
     bool _cfgLlmIdle = true;
+    int _cfgTokenTier = 1;
     bool _cfgLlmQuestions = true;
-    double _lastWeatherIdleAt = 0.0;  // 主动天气闲聊最多每小时一次
+    WeatherCadence _weatherCadence;
     bool _cfgWeather = false;         // 天气闲聊（配置里打开才在闲时提天气）
     PetWeather _weather;
     std::string _cfgWeatherLoc;       // 主人所在位置（可空）

@@ -18,6 +18,19 @@ Lang g_lang = Lang::Zh;
 
 // clang-format off
 const std::pair<const char*, const char*> kEn[] = {
+    { "捏捏脸", "Pinch her cheeks" },
+    { "Token 节省", "Token savings" },
+    { "节省档位", "Savings level" },
+    { "完整", "Full" },
+    { "均衡", "Balanced" },
+    { "节省", "Save" },
+    { "极省", "Minimal" },
+    { "完整：最近 6 条消息，按原间隔互动，回复使用供应商默认上限。", "Full: last 6 messages, original idle interval, provider's default reply limit." },
+    { "均衡：最近 4 条消息，小剧场间隔 ×1.5，回复上限 1536 Token。", "Balanced: last 4 messages, idle interval x1.5, reply limit 1536 tokens." },
+    { "节省：最近 2 条消息，小剧场间隔 ×3，回复上限 1024 Token。", "Save: last 2 messages, idle interval x3, reply limit 1024 tokens." },
+    { "极省：仅当前问题，关闭自动小剧场，回复上限 768 Token。", "Minimal: current question only, no automatic idle scenes, reply limit 768 tokens." },
+    { "不删除已保存的记忆；性格、台词库和记忆整理保留独立预算。完整档可提前补题，其余档题库问完再更新。实际节省量取决于使用情况。", "Saved memories stay intact. Personality, reaction lines and memory maintenance keep independent budgets. Full may refill questions early; other levels refill only after all questions have been asked. Actual savings vary." },
+    { "最近一次 {}→{} Token · 本次运行对话与维护累计 {}→{} Token", "Latest {} -> {} tokens; dialogue and maintenance this run {} -> {} tokens" },
     { "气泡最短显示时间", "Minimum bubble display time" },
     { "复制接入文件路径", "Copy integration file path" },
     { "接入说明文件", "Integration file" },
@@ -524,6 +537,19 @@ const std::pair<const char*, const char*> kEn[] = {
 // 术语取向：面板 UI 用中性礼貌体（「〜中」「〜する」）；她的台词语言由 LLM 按 lang 生成。
 // clang-format off
 const std::pair<const char*, const char*> kJa[] = {
+    { "捏捏脸", "ほっぺをつまむ" },
+    { "Token 节省", "トークン節約" },
+    { "节省档位", "節約レベル" },
+    { "完整", "フル" },
+    { "均衡", "標準" },
+    { "节省", "節約" },
+    { "极省", "最小" },
+    { "完整：最近 6 条消息，按原间隔互动，回复使用供应商默认上限。", "フル：直近6件、従来の待機間隔、返信上限はサービスの既定値。" },
+    { "均衡：最近 4 条消息，小剧场间隔 ×1.5，回复上限 1536 Token。", "標準：直近4件、待機間隔1.5倍、返信上限1536トークン。" },
+    { "节省：最近 2 条消息，小剧场间隔 ×3，回复上限 1024 Token。", "節約：直近2件、待機間隔3倍、返信上限1024トークン。" },
+    { "极省：仅当前问题，关闭自动小剧场，回复上限 768 Token。", "最小：現在の質問のみ、自動小劇場を停止、返信上限768トークン。" },
+    { "不删除已保存的记忆；性格、台词库和记忆整理保留独立预算。完整档可提前补题，其余档题库问完再更新。实际节省量取决于使用情况。", "保存した記憶は削除しません。性格・反応の台詞・記憶整理は独立した予算を維持します。フルでは早めに質問を補充し、他のレベルでは全問を聞いてから更新します。節約量は使い方によって変わります。" },
+    { "最近一次 {}→{} Token · 本次运行对话与维护累计 {}→{} Token", "直近 {}→{} トークン・今回の会話と整理の累計 {}→{} トークン" },
     { "气泡最短显示时间", "吹き出しの最短表示時間" },
     { "复制接入文件路径", "接続ファイルのパスをコピー" },
     { "接入说明文件", "接続説明ファイル" },
