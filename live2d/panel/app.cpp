@@ -366,6 +366,9 @@ eui::Color kText, kMuted, kPink, kGreen, kOrange, kPurple, kDanger, kAccent,
 // 品牌渐变（主视觉：粉 → 紫 → 蓝）与投影色——两套主题共用
 const eui::Color kBrandA = C(0xFF7EB3), kBrandB = C(0x8B7CFF), kBrandC = C(0x58B4FF), kViolet = C(0x7C6CFF);
 eui::Color kShadow, kShadowHot;
+// 睡觉回满精力的秒数：与桌宠 PlayerLife.cpp 的 dt / 1200.0f 是同一个数，
+// 只用于估算"大约还有多久会自己醒"（两边改一个就要改另一个）
+const float kSleepFullSecs = 1200.0f;
 
 void ApplyTheme()
 {
@@ -1278,7 +1281,7 @@ void PageStatus(Pen& p)
         const float x = p.x + 22.0f, w = p.w - 44.0f, bw = two ? (w - 36.0f) / 2.0f : w;
         // 每条下面写"什么会让它变"——状态页不只是看数，而是告诉你怎么影响她
         const struct { const char* id; const char* l; const char* k; eui::Color c; const char* hint; } bars[] = {
-            { "b.energy", "精力", "energy", kGreen, "睡觉恢复 · 每次互动都消耗" },
+            { "b.energy", "精力", "energy", kGreen, "睡觉恢复快 · 醒着恢复慢 · 互动消耗" },
             { "b.aff", "亲密度", "affection", kPink, "摸头、牵手会涨 · 她累了还闹、久别会掉" },
             { "b.annoy", "恼火", "annoy", kOrange, "连戳会涨 · 摸头消气，也会自己消" },
             { "b.lonely", "寂寞", "lonely", kPurple, "被晾着会涨 · 理她、陪她玩就降" } };
@@ -1353,7 +1356,7 @@ void PageStatus(Pen& p)
             const float annoyNow = (float)mood.get("annoy").numOr(0);
             if (st == "asleep" && energy < 0.3f)
             {
-                const float left = std::max(0.0f, (0.95f - energy) * 1500.0f);
+                const float left = std::max(0.0f, (0.95f - energy) * kSleepFullSecs);
                 NextRow(p.ui, "nx.sleep", ix, y, iw, "累趴了，在补觉（戳不醒）",
                         i18n::TF("精力回到 30% 前怎么戳都不会醒；大约 {} 后自己醒", { Dur(left) }),
                         energy / 0.95f, kPurple);
@@ -1373,7 +1376,7 @@ void PageStatus(Pen& p)
             }
             else if (st == "asleep")
             {
-                const float left = std::max(0.0f, (0.95f - energy) * 1500.0f);
+                const float left = std::max(0.0f, (0.95f - energy) * kSleepFullSecs);
                 NextRow(p.ui, "nx.sleep", ix, y, iw, "睡着了 · 精力回到 95% 会自己醒",
                         left > 1.0f ? i18n::TF("大约还要 {}（摸摸头她会在梦里笑，戳两下会醒）", { Dur(left) })
                                     : i18n::T("快醒了"),
