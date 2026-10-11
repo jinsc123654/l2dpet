@@ -371,9 +371,17 @@ void RestoreQuestionOptions(jsonlite::Value* seq, const std::vector<const PetQue
         const jsonlite::Value& opts = step.get("options");
         if (questions != NULL)
         {
+            const std::string speechKey = QuestionTextKey(speech);
+            const auto ends = [&](const char* tail) {
+                const std::string value = tail;
+                return speechKey.size() >= value.size()
+                    && speechKey.compare(speechKey.size() - value.size(), value.size(), value) == 0;
+            };
+            const bool bareQuestion = ends("什么") || ends("什么呀") || ends("什么呢")
+                || ends("干嘛") || ends("干嘛呀") || ends("吗") || ends("么");
             const bool questionLike = opts.isArr() || id.isStr() || id.isNum()
-                || speech.find("?") != std::string::npos || speech.find("？") != std::string::npos;
-            if (questions->AlreadyAsked(speech)
+                || bareQuestion || speech.find("?") != std::string::npos || speech.find("？") != std::string::npos;
+            if ((questionLike && questions->AlreadyAsked(speech))
                 || (questionLike && (selected == NULL || selected->asked > 0 || !selected->answer.empty())))
             {
                 ObjDel(&step, "speak");

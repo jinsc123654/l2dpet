@@ -51,5 +51,11 @@ int main()
     assert(!seq.get("steps").arr[0].has("speak"));
     assert(seq.get("steps").arr[0].has("emotion"));
     assert(!seq.get("steps").arr[1].has("speak"));
+    seq = Parse(R"({"steps":[{"speak":"你平时做什么我都记得，我会陪着你。"}]})");
+    RestoreQuestionOptions(&seq, {}, &loaded);
+    assert(seq.get("steps").arr[0].has("speak")); // Normal statements are not questions.
+    seq = Parse(R"({"steps":[{"speak":"你平时做什么呀"}]})");
+    RestoreQuestionOptions(&seq, {}, &loaded);
+    assert(!seq.get("steps").arr[0].has("speak")); // Missing punctuation must not bypass question guards.
     std::cout << "PASS stable IDs, canonical answers, unanswered/answered history, regeneration and display guard\n";
 }
