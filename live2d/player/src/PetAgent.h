@@ -141,6 +141,8 @@ private:
     // 台词库
     bool _linesOk = false;
     double _linesLast = 0.0;
+    double _linesRetryAt = 0.0;   // 生成失败后的下次重试时刻：不然一个"总也生成不出来"的台词库
+                                  // 每一轮循环都会重来（一次 3 次尝试 ≈ 30 秒，把回应全堵住、还烧 token）
     bool _linesDirty = false;
     bool _linesUrgent = false;   // 主人刚答了问题：下次空闲立刻重写台词库（不等 kLinesRefresh）
     std::string _linesDirtyReason;

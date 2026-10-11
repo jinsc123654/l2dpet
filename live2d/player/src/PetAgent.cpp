@@ -430,7 +430,13 @@ const double kRespondMaxDur = 6.0;
 const int kMaxExprPerSeg = 2;
 const int kMemoryEvery = 6;
 const double kMemoryIdle = 1200.0;
+/** 后台 LLM 活（台词库重写 / 题库补货 / 笑话补货 / 记忆压缩）要等主人这边安静这么久才开工：
+ *  它们单次 10 秒上下，排在"刚点完她的回应"前面就会把回应堵慢（比 kRespondCooldown 略宽，
+ *  把一整轮回应窗口让过去——2026-10-12 那条 11.7 秒的台词库重写就是这么堵的） */
+const double kBackgroundQuiet = 12.0;
 const double kLinesRefresh = 900.0;
+/** 台词库生成失败后的退避：一次不成就等这么久再试（太短会把 agent 堵在重试里，太长又赶不上"主人回答"） */
+const double kLinesRetry = 120.0;
 const double kIdlePeriodDefault = 60.0;
 
 // ---- 提示词（与 pet_agent.py 同文）
@@ -678,15 +684,20 @@ void PetAgent::Run()
                 Consolidate("定时", false);
             }
         }
-        if (!asleep && _linesDirty && (_linesUrgent || NowSec() - _linesLast >= kLinesRefresh)
-            && NowSec() - _lastLlmAt >= 3.0)
+        // 后台的 LLM 活（台词库重写、题库/笑话补货、记忆压缩）让路给主人这边的事：有攒着的身体互动、
+        // 还在等主人选选项、或距上次被碰不足一轮回应冷却，就先不做
+        const double backNow = NowSec();
+        const bool backgroundOk = _backlog[0].empty() && _backlog[1].empty() && backNow >= _awaitingUntil
+                                  && backNow - _lastTouchAt >= kBackgroundQuiet;
+        if (!asleep && backgroundOk && _linesDirty && backNow >= _linesRetryAt
+            && (_linesUrgent || backNow - _linesLast >= kLinesRefresh) && backNow - _lastLlmAt >= 3.0)
         {
             _linesUrgent = false;
             PushLines(_linesDirtyReason.empty() ? "记忆更新" : _linesDirtyReason);
             _linesDirtyReason.clear();
         }
         // 问题库定期体检：答够几题 / 没新鲜题 / 太旧 → 带着"已知"重新生成一批（新题材、不重复）
-        if (!asleep)
+        if (!asleep && backgroundOk)
         {
             static double qCheckAt = NowSec();   // 从启动时算起（启动时已经各做过一次）
             if (NowSec() - qCheckAt >= 300.0 && !_questions.Empty())
@@ -960,7 +971,8 @@ void PetAgent::Run()
             else if (ev == "choice")
             {
                 const std::string label = GetStr(&e, "label");
-                interrupt = "【回应】用户在气泡选项里选了「" + label + "」，接着这个选择继续（这段可以到 8 秒）。";
+                interrupt = "【回应】用户在气泡选项里选了「" + label + "」，接着这个选择继续（这段可以到 8 秒）；"
+                            "第一步就说一句回应这个选择的话，别只做动作。";
                 const jsonlite::Value* did = ObjGet(&e, "did");
                 _choiceDid = did != NULL && did->isArr() && !did->arr.empty();
                 if (_choiceDid)
@@ -1221,9 +1233,12 @@ void PetAgent::Run()
         {
             for (size_t i = 0; i < warns->arr.size(); ++i) _lastWarn.push_back(warns->arr[i]);
         }
-        char res[160];
-        snprintf(res, sizeof(res), "第 %ld 段 dur=%.1f → ok=%d accepted=%.0f warnings=%zu",
-                 _segN, GetNum(&seq, "dur", 0), (int)ok, GetNum(&reply, "accepted", 0), _lastWarn.size());
+        char res[200];
+        // 应了一段却一句台词都没有 = 主人刚答完/刚摸完却什么也没听见（提示词要求有台词，模型有时仍只做动作）
+        const bool silentReply = responding && SummarizeSay(seq).empty();
+        snprintf(res, sizeof(res), "第 %ld 段 dur=%.1f → ok=%d accepted=%.0f warnings=%zu%s",
+                 _segN, GetNum(&seq, "dur", 0), (int)ok, GetNum(&reply, "accepted", 0), _lastWarn.size(),
+                 silentReply ? "（这句回应一句台词都没有）" : "");
         Log(res);
         Report(kind, note, &seq, ok, ok ? "" : GetStr(&reply, "msg"), asked, (int)_lastWarn.size());
         // 记住提问内容（choice 回来时记进记忆）
@@ -1916,6 +1931,7 @@ void PetAgent::PushLines(const std::string& reason)
     {
         Report("台词库", "生成即时台词库", NULL, false, err, false, 0);
         Log("台词库生成失败（" + err + "），桌宠用内置台词");
+        _linesRetryAt = NowSec() + kLinesRetry;   // 失败退避（_linesLast 只记成功，所以这里必须自己记）
         return;
     }
     const std::string reply = Rpc("{\"cmd\":\"reactions\",\"lines\":" + ValueToJson(lines) + "}");
