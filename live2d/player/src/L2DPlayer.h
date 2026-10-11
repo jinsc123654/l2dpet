@@ -2646,11 +2646,22 @@ public:
 
     /** 精力低于这个 = 累了：再互动就掉亲密度 */
     static constexpr csmFloat32 kTiredEnergy = 0.3f;
+    /** 醒着时的精力平衡点：低于它慢慢回升，高于它慢慢落回（见 PetLifeTick）。
+     *  满格只能睡出来——醒着再怎么待机也只回到这里，所以"陪她玩"能真正把她玩累 */
+    static constexpr csmFloat32 kAwakeEnergyCeil = 0.65f;
     /** 一次互动的代价：先扣精力；如果她**已经累了**（扣之前就 < kTiredEnergy），这次互动还要
      *  掉亲密度（不走边际递减，线性 -0.02）、涨一点恼火，并抱怨一句（8 秒内最多一句）。
      *  返回 true = 她累了（调用方据此不再做正常的开心反应） */
     bool InteractCost(csmFloat32 cost, const char* what)
     {
+        if (cost > 0.0f)
+        {
+            // 短时间连续玩耍叠加：4 秒内接着玩算连击，每一多下 +25%，最多翻倍（别叠加太高）；
+            // 停手超过 4 秒就清零，慢慢陪她玩不受影响
+            _playCombo = (_perfClock - _playComboAt <= 4.0f) ? _playCombo + 1 : 1;
+            _playComboAt = _perfClock;
+            cost *= std::min(1.0f + 0.25f * (csmFloat32)(_playCombo - 1), 2.0f);
+        }
         const bool tired = _lifeEnergy < kTiredEnergy;
         _lifeEnergy = Clamp01(_lifeEnergy - cost);
         if (!tired) return false;
@@ -3477,6 +3488,8 @@ private:
     csmFloat32 _userIdleT = 0.0f, _sinceTouchT = 0.0f, _lastPx = -1.0f, _lastPy = -1.0f;
     csmFloat32 _workT = 0.0f;
     csmFloat32 _tiredSayAt = -100.0f;   // 上次"好累"抱怨（防刷屏）
+    int _playCombo = 0;                 // 连续玩耍的连击数（4 秒内接着玩才叠加，见 InteractCost）
+    csmFloat32 _playComboAt = -100.0f;  // 上一次花钱的互动时刻
     // ---- 状态页反馈数据（panel_state.life）：动态流 / 情绪曲线 / 部位分布 / 猜拳战绩 / 相识日
     struct FeedItem { double t; std::string kind, text; };
     std::deque<FeedItem> _feed;                    // 最近动态（≤40 条）

@@ -1281,7 +1281,7 @@ void PageStatus(Pen& p)
         const float x = p.x + 22.0f, w = p.w - 44.0f, bw = two ? (w - 36.0f) / 2.0f : w;
         // 每条下面写"什么会让它变"——状态页不只是看数，而是告诉你怎么影响她
         const struct { const char* id; const char* l; const char* k; eui::Color c; const char* hint; } bars[] = {
-            { "b.energy", "精力", "energy", kGreen, "睡觉恢复快 · 醒着恢复慢 · 互动消耗" },
+            { "b.energy", "精力", "energy", kGreen, "睡觉回满 · 醒着最多回到 65% · 互动消耗" },
             { "b.aff", "亲密度", "affection", kPink, "摸头、牵手会涨 · 她累了还闹、久别会掉" },
             { "b.annoy", "恼火", "annoy", kOrange, "连戳会涨 · 摸头消气，也会自己消" },
             { "b.lonely", "寂寞", "lonely", kPurple, "被晾着会涨 · 理她、陪她玩就降" } };

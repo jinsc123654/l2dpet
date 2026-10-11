@@ -2107,6 +2107,8 @@ std::string L2DPlayer::PetCommand(const std::string& line, csmFloat32 fps, bool*
             jsonlite::Value sv;
             if (jsonlite::parse(step.c_str(), step.size(), sv, NULL)) ExecPetStep(sv, NULL, -1, false);
             NoteExternalActivity();
+            // 外部接入的消息也花一点精力；睡着时只弹气泡、不掉精力（她在休息，别把活算她头上）
+            if (_lifeState != LS_ASLEEP) _lifeEnergy = Clamp01(_lifeEnergy - 0.01f);
         }
         return head + "\"ok\":true,\"type\":\"companion_event\",\"shown\":"
             + (feedback.shown ? "true" : "false") + ",\"reason\":" + JStrRet(feedback.reason) + "}";
@@ -3066,6 +3068,13 @@ std::string L2DPlayer::PetCommand(const std::string& line, csmFloat32 fps, bool*
         return o + "}";
     }
     NoteExternalActivity();
+    // 外部接入的"说出口的话"（带 client_id 的 speak/say/sequence）也花一点精力：动作/表情不算，
+    // 睡着只弹气泡不扣。桌宠自己的 agent 走同一条命令但不带 client_id，所以她自己闲聊不花。
+    if (accepted > 0 && (cmd == "speak" || cmd == "sequence") && !v.get("client_id").isNull()
+        && _lifeState != LS_ASLEEP)
+    {
+        _lifeEnergy = Clamp01(_lifeEnergy - 0.01f);
+    }
     std::string o = head + "\"ok\":" + ((strict && !warn.empty()) ? "false" : "true")
                     + ",\"accepted\":" + std::to_string(accepted);
     if (dur > 0.0f)

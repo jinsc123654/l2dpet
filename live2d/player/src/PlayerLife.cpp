@@ -521,11 +521,20 @@ void L2DPlayer::PetLifeTick(csmFloat32 dt, bool rawHas, csmFloat32 px, csmFloat3
     const bool busy = !_petSeqs.empty() || !_scenes.empty();   // LLM 段在演：不抢戏
 
     // 节律
-    // 精力两个方向都回：睡觉快（满格约 20 分钟），醒着慢（白天满格约 60 分钟、夜里约 75 分钟——熬夜回得慢）。
-    // 互动照旧扣精力，于是精力是"被闹过之后缓回来的进度"，不再是只漏不进的水池。
-    // 面板"大约多久会自己醒"按睡觉那一档估算：改这里的 1200.0f 要同步 live2d/panel/app.cpp 的同名常数。
-    if (_lifeState == LS_ASLEEP) _lifeEnergy = Clamp01(_lifeEnergy + dt / 1200.0f);
-    else _lifeEnergy = Clamp01(_lifeEnergy + dt / (night ? 4500.0f : 3600.0f));
+    // 精力：睡觉快速回满（满格约 20 分钟）；醒着的平衡点是 65%（kAwakeEnergyCeil）——低于它慢慢回升
+    // （白天约 60 分钟满格、夜里约 75 分钟），高于它慢慢落回。满格只能睡出来，所以白天再怎么待机也只到
+    // 65%，"陪她玩"能真正把她玩累（互动消耗见 InteractCost）。
+    // 面板"大约多久会自己醒"按睡觉那一档估算：改这里的 1200.0f 要同步 live2d/panel/app.cpp 的 kSleepFullSecs。
+    if (_lifeState == LS_ASLEEP)
+    {
+        _lifeEnergy = Clamp01(_lifeEnergy + dt / 1200.0f);
+    }
+    else
+    {
+        const csmFloat32 drift = dt / (night ? 4500.0f : 3600.0f);
+        _lifeEnergy = _lifeEnergy < kAwakeEnergyCeil ? Clamp01(_lifeEnergy + drift)
+                                                    : Clamp01(_lifeEnergy - drift);
+    }
     _lifeAnnoy = Clamp01(_lifeAnnoy - dt / (_lifeState == LS_SULK ? 90.0f : 35.0f));
     // 寂寞：被晾着约 20 分钟才满（原来 2.5 分钟就满——几乎永远 100）
     if (_sinceTouchT > 45.0f && _lifeState == LS_AWAKE) _lifeLonely = Clamp01(_lifeLonely + dt / 1200.0f);
