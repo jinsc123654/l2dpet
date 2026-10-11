@@ -2215,6 +2215,7 @@ void PageLLM(Pen& p)
                 return;
             }
             std::string cmd = "{\"cmd\":\"llm_providers\",\"active\":" + JStr(S.llmEditId) + ",\"providers\":[";
+            std::map<std::string, std::string> keyedTails;   // 本次新下发的密钥（id → 末 4 位）
             for (size_t i = 0; i < S.llmProvs.size(); ++i)
             {
                 const AppState::LlmProvEd& pr = S.llmProvs[i];
@@ -2231,11 +2232,24 @@ void PageLLM(Pen& p)
                 if (nk != S.llmNewKeys.end() && !nk->second.empty())
                 {
                     cmd += ",\"api_key\":" + JStr(nk->second);   // 只在新填了密钥时下发（其余按 id 保留）
+                    const std::string& k = nk->second;
+                    keyedTails[pr.id] = k.size() >= 4 ? k.substr(k.size() - 4) : k;
                 }
                 cmd += "}";
             }
             cmd += "]}";
             S.link.send(cmd);
+            // 工作副本只在启动时从桌宠状态载入一次：保存后不就地更新"已保存（末 4 位 …）"提示的话，
+            // 输入框会一直提示"未设置（必填）"，看着像密钥没存上（其实已经写进 llm.json 了）。
+            for (size_t i = 0; i < S.llmProvs.size(); ++i)
+            {
+                std::map<std::string, std::string>::const_iterator t = keyedTails.find(S.llmProvs[i].id);
+                if (t != keyedTails.end())
+                {
+                    S.llmProvs[i].keySet = true;
+                    S.llmProvs[i].keyTail = t->second;
+                }
+            }
             S.llmNewKeys.clear();
             S.lpKey.set("");
             Toast(i18n::TF("已保存：{} 生效（agent 下一次调用就用它）", { e->name }));

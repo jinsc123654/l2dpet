@@ -214,6 +214,9 @@ xcopy "%WORK%\build-panel-win\Release\assets" "%OUT%\assets" /E /I /Y /Q >nul ||
 rem external Hook / MCP adapter (Python 3.9+ required only for integrations)
 if not exist "%OUT%\tools" mkdir "%OUT%\tools"
 copy /Y "%ROOT%\live2d\tools\pet_bridge.py" "%OUT%\tools\pet_bridge.py" >nul || goto fail
+rem the doc goes BOTH next to the exe (that is where the pet looks for it and publishes
+rem ~/.config/l2dpet/integration/README.md from) and into tools\ (human-readable copy)
+copy /Y "%ROOT%\EXTERNAL-INTEGRATION.md" "%OUT%\EXTERNAL-INTEGRATION.md" >nul || goto fail
 copy /Y "%ROOT%\EXTERNAL-INTEGRATION.md" "%OUT%\tools\EXTERNAL-INTEGRATION.md" >nul || goto fail
 
 rem bundled sample model (Live2D Hiyori, Free Material License) so an empty model library still starts
@@ -249,6 +252,8 @@ if exist "%OUT%\assets\Font Awesome 7 Free-Solid-900.otf" (echo   [ok] panel ico
 if exist "%OUT%\l2dpet.png" (echo   [ok] window icon l2dpet.png) else (echo   [x] window icon missing & set "BAD=1")
 if exist "%OUT%\l2dpet.ico"    (echo   [ok] tray icon l2dpet.ico) else (echo   [x] l2dpet.ico missing & set "BAD=1")
 if exist "%OUT%\l2dpet-logo.png" (echo   [ok] about-page logo) else (echo   [x] l2dpet-logo.png missing & set "BAD=1")
+rem next to the exe = the copy the pet publishes as integration\README.md (tools\ is just for humans)
+if exist "%OUT%\EXTERNAL-INTEGRATION.md" (echo   [ok] external-integration doc) else (echo   [x] EXTERNAL-INTEGRATION.md missing next to the exe & set "BAD=1")
 if exist "%OUT%\models\Hiyori\Hiyori.model3.json" (echo   [ok] bundled sample model Hiyori) else (echo   [x] sample model missing & set "BAD=1")
 if not "%BAD%"=="0" ( echo [x] self-check failed & exit /b 1 )
 

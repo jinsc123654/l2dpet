@@ -201,6 +201,10 @@ PetMemory::PetMemory(const std::string& charId, const std::string& charName)
 {
     _root = HomePath("/.config/l2dpet/memory");
     _charsDir = _root + "/chars";
+    // 递归建好 memory/ 与 memory/chars：下面的 EnsureDir 只有一层 mkdir（CreateDir 默认非递归），
+    // 父目录不存在时 mkdir("…/chars") 直接 ENOENT —— 全新配置目录上写记忆/习惯会**静默失败**
+    // （memory_isolation_test 在干净 HOME 上也因此挂过）。
+    plat::CreateDir(_charsDir, true);
     _ownerPath = _root + "/owner.md";
     _charPath = _charsDir + "/" + _charId + ".md";
     _habitsPath = _charsDir + "/" + _charId + ".habits.json";

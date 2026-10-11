@@ -149,6 +149,13 @@ UI_FONT="$UI_DIR/assets/JingNanJunJunTi-JinNanJunJunTi-Bold-2.ttf"
 for t in pet_client.py pet_agent.py pet_memory.py pet_verbs.py pet_bridge.py; do
     [ -f "$ROOT/live2d/tools/$t" ] && cp -f "$ROOT/live2d/tools/$t" "$STAGE/tools/$t"
 done
+# 外部接入说明：桌宠按"exe 同目录"找它，并发布到 ~/.config/l2dpet/integration/README.md
+# （integration.json 的 instructions 指的就是这份），所以必须放在包的根目录、与 l2dtest 同级；
+# tools/ 再放一份供人直接翻阅（与 Windows 侧打包口径一致）。
+# 缺根目录这份 = 装完 integration/README.md 不生成，而 integration.json 仍指向它 → 接入方拿到空路径。
+[ -f "$ROOT/EXTERNAL-INTEGRATION.md" ] || die "缺 EXTERNAL-INTEGRATION.md（外部接入说明）"
+cp -f "$ROOT/EXTERNAL-INTEGRATION.md" "$STAGE/EXTERNAL-INTEGRATION.md"
+cp -f "$ROOT/EXTERNAL-INTEGRATION.md" "$STAGE/tools/EXTERNAL-INTEGRATION.md"
 
 printf '%s\n' "$VERSION" >"$STAGE/VERSION"
 
@@ -185,6 +192,9 @@ tar -tvzf "$TARBALL" | awk '{print $1, $NF}' | grep -E "/(l2dpet|install\.sh|uni
 done || die "tar.gz 自检没过"
 [ -f "$STAGE/assets/Font Awesome 7 Free-Solid-900.otf" ] || die "包里缺 EUI 图标字体（面板图标会退化）"
 [ -f "$STAGE/l2dpet-logo.png" ] || die "包里缺关于页头像 l2dpet-logo.png（关于页会空白）"
+[ -f "$STAGE/tools/EXTERNAL-INTEGRATION.md" ] || die "包里缺外部接入说明 tools/EXTERNAL-INTEGRATION.md"
+# 根目录这份是桌宠发布 integration/README.md 的来源（见上），缺了外部接入文档就发布不出来
+[ -f "$STAGE/EXTERNAL-INTEGRATION.md" ] || die "包里缺 EXTERNAL-INTEGRATION.md（外部接入说明发布不出来）"
 
 # 真正安装到隔离 HOME，覆盖安装器漏文件、菜单路径含空格、安装后启动器不可用。
 INSTALL_SMOKE=$(mktemp -d)
