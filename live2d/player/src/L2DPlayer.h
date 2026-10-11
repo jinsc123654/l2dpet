@@ -2162,6 +2162,9 @@ public:
     void CfgLoad();
     void CfgSave()
     {
+        // 兜底：没把配置读上来就存盘 = 把主人的设置写成空表。
+        // （踩过：切换模型原地重建播放器后紧接着 CfgSave 记模型名，config.json 里只剩 str.model。）
+        if (!_cfgLoaded) return;
         const std::string path = CfgPath();
         const std::string dir = path.substr(0, path.rfind('/'));
 

@@ -218,6 +218,13 @@ int PetRuntime::Run()
         malloc_trim(0); // 把旧模型的空闲页交还系统（内存受限机器：防切换峰值翻倍）
 #endif
         new (&player) L2DPlayer();
+        // placement new 会把**整个对象的运行时状态**清空，不只是 config：
+        //   ① 接入端口变 0 → integration.json 发布 port 0（外部助手照文档读会读到 0）；
+        //   ② _cfg 变空（连默认值都没有）→ 紧接着那次 CfgSave（记模型名）会把 config.json
+        //      写成空的，主人的设置全丢。
+        // 启动路径随后也会 CfgLoad（幂等），这里补上是为了让"切模型"和"启动"走同一条路。
+        player.CfgLoad();
+        if (opt->ctlPort > 0) player._integration.activePort = opt->ctlPort;
         player.SetNoMotion(opt->noMotion);
         player.SetRenderZoom(keepZoom > 0.0f ? keepZoom : opt->renderZoom);
         // 切换后固定用"当前缩放"（不重新自动适配；用户可拖缩放条再调）
