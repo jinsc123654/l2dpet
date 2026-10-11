@@ -465,20 +465,44 @@ bool ReapChild(long pid, bool* exited, int* status)
 #endif
 }
 
-bool WaitChildExit(long pid, int timeoutMs)
+bool WaitChildExit(long pid, int timeoutMs, bool stopOnTimeout, int* exitCode)
 {
+    if (exitCode != NULL) *exitCode = -1;
 #if defined(_WIN32)
-    HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, (DWORD)pid);
-    if (h == NULL) return true;
+    HANDLE h = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | (stopOnTimeout ? PROCESS_TERMINATE : 0), FALSE, (DWORD)pid);
+    if (h == NULL) return !stopOnTimeout;
     const DWORD w = WaitForSingleObject(h, timeoutMs < 0 ? INFINITE : (DWORD)timeoutMs);
+    if (w == WAIT_TIMEOUT && stopOnTimeout) { TerminateProcess(h, 124); WaitForSingleObject(h, INFINITE); }
+    DWORD code = 0;
+    if (w == WAIT_OBJECT_0 && GetExitCodeProcess(h, &code) && exitCode != NULL) *exitCode = (int)code;
     CloseHandle(h);
     return w == WAIT_OBJECT_0;
 #else
     for (int waited = 0;; ++waited)
     {
         int st = 0;
-        if (waitpid((pid_t)pid, &st, WNOHANG) == (pid_t)pid) return true;
-        if (timeoutMs >= 0 && waited * 20 >= timeoutMs) return false;
+        const pid_t result = waitpid((pid_t)pid, &st, WNOHANG);
+        if (result == (pid_t)pid)
+        {
+            if (exitCode != NULL) *exitCode = WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+            return true;
+        }
+        if (result < 0 && errno != EINTR) return false;
+        if (timeoutMs >= 0 && waited * 20 >= timeoutMs)
+        {
+            if (stopOnTimeout)
+            {
+                kill((pid_t)pid, SIGTERM);
+                for (int grace = 0; grace < 25; ++grace)
+                {
+                    if (waitpid((pid_t)pid, &st, WNOHANG) == (pid_t)pid) return false;
+                    SleepMs(20);
+                }
+                kill((pid_t)pid, SIGKILL);
+                while (waitpid((pid_t)pid, &st, 0) < 0 && errno == EINTR) {}
+            }
+            return false;
+        }
         SleepMs(20);
     }
 #endif

@@ -124,6 +124,7 @@ void TerminateChild(long pid);
 bool ReapChild(long pid, bool* exited, int* status);
 
 /** 阻塞等待子进程退出（最多 timeoutMs；timeoutMs<0 = 无限等）。返回 true = 已退出。 */
-bool WaitChildExit(long pid, int timeoutMs);
+// stopOnTimeout terminates and reaps the child before returning false; exitCode is -1 unless it exits normally.
+bool WaitChildExit(long pid, int timeoutMs, bool stopOnTimeout = false, int* exitCode = NULL);
 
 }   // namespace plat

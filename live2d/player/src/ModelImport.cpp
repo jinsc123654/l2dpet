@@ -189,7 +189,8 @@ bool ImportModelInto(const std::string& srcPath, const std::string& root, std::s
 #else
         const long pid = plat::SpawnDetached("/usr/bin/unzip", { "-o", "-q", srcPath, "-d", tmpDir }, std::string());
 #endif
-        if (pid <= 0 || !plat::WaitChildExit(pid, 120000))
+        int extractionExit = -1;
+        if (pid <= 0 || !plat::WaitChildExit(pid, 120000, true, &extractionExit) || extractionExit != 0)
         {
             RemoveDirTree(tmpDir);
             *err = "解压失败（解压工具不可用或包损坏）";
