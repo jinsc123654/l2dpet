@@ -1620,11 +1620,12 @@ void PageWindow(Pen& p)
 {
     PageTitle(p, "窗口", "桌宠窗口的显示方式（模型与能力见「模型」页）");
     Section(p, "sec.disp", "显示");
-    Card(p.ui, "disp.card", p.x, p.y, p.w, 3 * ToggleH() + 4 * SliderH(p.w));
+    Card(p.ui, "disp.card", p.x, p.y, p.w, 3 * ToggleH() + 5 * SliderH(p.w));
     SliderRow(p, "s.zoom", "大小（也可在角色上滚滚轮）", "zoom", 0.5f, 2.0f, 0.05f, [](float v) { return std::to_string((int)std::lround(v * 100)) + "%"; });
     Divider(p.ui, "d1", p.x, p.y, p.w);
     SliderRow(p, "s.op", "不透明度", "opacity", 0.2f, 1.0f, 0.05f, [](float v) { return std::to_string((int)std::lround(v * 100)) + "%"; });
     SliderRow(p, "s.bubble", "气泡字号", "bubble_px", 10.0f, 40.0f, 1.0f, [](float v) { return std::to_string((int)std::lround(v)) + "px"; });
+    SliderRow(p, "s.bubble.gap", "气泡与角色间距", "bubble_gap", 0.0f, 60.0f, 1.0f, [](float v) { return std::to_string((int)std::lround(v)) + "px"; });
     Divider(p.ui, "d2", p.x, p.y, p.w);
     ToggleRow(p, "t.top", "总在最前", "", "top");
     Divider(p.ui, "d3", p.x, p.y, p.w);

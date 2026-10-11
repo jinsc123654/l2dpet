@@ -2164,6 +2164,13 @@ std::string L2DPlayer::PetCommand(const std::string& line, csmFloat32 fps, bool*
                     snprintf(bpx, sizeof(bpx), "%d", (int)(bp + 0.5f));
                     plat::SetEnv("L2DPET_BUBBLE_PX", bpx);
                 }
+                const csmFloat32 bg = Cfg("bubble_gap");
+                if (bg >= 0.0f && bg <= 120.0f)
+                {
+                    char bgp[32];
+                    snprintf(bgp, sizeof(bgp), "%d", (int)(bg + 0.5f));
+                    plat::SetEnv("L2DPET_BUBBLE_GAP", bgp);
+                }
             }
             CfgSave();
             _petEvents.push_back("{\"event\":\"config\",\"config\":" + CfgJson() + "}");

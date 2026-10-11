@@ -232,6 +232,13 @@ private:
     int _wheel = 0;
     const uint32_t* _lastFrame = NULL;
     int _shapeCountdown = 0;
+    // 角色轮廓 bbox（窗口坐标）：从 _lastFrame 的 alpha 粗扫（对齐 X11 端口的 UpdateInputShape，
+    // 每 0.5s 一次）。气泡锚点要用它——按"窗口高度百分比"算会随模型在窗口里的占比漂。
+    int _cmTop = 0;
+    int _cmHeadMinX = 0, _cmHeadMaxX = 0, _cmBandH = 1;   // 头部带（顶部 1/8）
+    int _cmMidMinX = 0, _cmMidMaxX = 0;                   // 带中线那一行的轮廓左右：小圆点从这里出来
+    bool _cmOk = false;
+    double _cmAt = -10.0;
 
     // ---- 气泡状态
     std::vector<uint32_t> _bubbleBuf;
@@ -262,10 +269,17 @@ private:
     static std::string FindUiBinary();
     void PushRightMenu(int rootX, int rootY);   // 右键：工作区 + 时间戳（UI 进程弹菜单）
     void BubbleTick();                          // 气泡淡入淡出/跟随/呈现（每帧）
-    void AnchorBubble();                        // 重算气泡锚点（跟随角色窗口位置）
+    void AnchorBubble();                        // 重算/应用气泡锚点（冻结后在每帧只随窗口平移）
+    bool CharMetrics(int* top, int* hMinX, int* hMaxX, int* bandH);   // 轮廓顶 + 头部带（扫 _lastFrame）
+    void WindowWorkarea(int* mx, int* my, int* mw, int* mh);        // 窗口所在显示器的工作区（不是主屏）
     bool EnsureBubbleWindow(int w, int h);
     int _bubW = 0, _bubH = 0, _bubX = 0, _bubY = 0;
     int _bubLastX = -9999999, _bubLastY = -9999999;   // 最近下发的气泡位置（判"要不要跟着走"）
+    // 气泡锚点（窗口相对；只在弹出/缩放时算一次就冻结——模型晃头不带气泡乱动）
+    bool _anchorOk = false;
+    int _anchorX = 0, _anchorY = 0;
+    bool _anchorBox = false;                          // 冻结时是否拿到了头部带 bbox（兜底判定用）
+    int _aTop = 0, _aBot = 0, _aMinX = 0, _aMaxX = 0;
     bool _bubMapped = false;
     float _bubFontPx = 0.0f;   // 气泡布局时用的字号：绘制时按它复位，否则缩放一变就对不上
     float _bubLastA = -1.0f;
@@ -514,7 +528,7 @@ bool PortGlfwPet::Initialize(const PortConfig& cfg)
     // 位置：屏幕右下角（离任务栏留边）
     {
         int mx = 0, my = 0, mw = 0, mh = 0;
-        glfwGetMonitorWorkarea(glfwGetPrimaryMonitor(), &mx, &my, &mw, &mh);
+        WindowWorkarea(&mx, &my, &mw, &mh);
         _winX = mx + mw - _w - (int)(40 * _ui);
         _winY = my + mh - _h - (int)(60 * _ui);
     }
@@ -745,6 +759,19 @@ static float BubbleBasePx()
     return kBubbleBaseFontPx;
 }
 
+/** 气泡与角色轮廓的最小间距（像素，未乘缩放）：L2DPET_BUBBLE_GAP 由桌宠从 config 的
+ *  bubble_gap 推过来，与字号同一套环境变量通道。默认 0：小圆点末端正好落在轮廓边缘，
+ *  看着就是"从头发里长出来"；调大则整段往角色外侧挪。*/
+static float BubbleGapPx()
+{
+    if (const char* e = getenv("L2DPET_BUBBLE_GAP"))
+    {
+        const float v = (float)atof(e);
+        if (v >= 0.0f && v <= 120.0f) return v;
+    }
+    return 0.0f;
+}
+
 void PortGlfwPet::GlobalMouse(int* rootX, int* rootY, bool* down, bool* downR) const
 {
     *down = false;
@@ -970,7 +997,7 @@ const uint32_t* PortGlfwPet::FxComposite(const uint32_t* src)
 void PortGlfwPet::MoveToDefaultSpot()
 {
     int mx = 0, my = 0, mw = 0, mh = 0;
-    glfwGetMonitorWorkarea(glfwGetPrimaryMonitor(), &mx, &my, &mw, &mh);
+    WindowWorkarea(&mx, &my, &mw, &mh);
     _winX = mx + mw - _w - (int)(40 * _ui);
     _winY = my + mh - _h - (int)(60 * _ui);
     glfwSetWindowPos(_win, _winX, _winY);
@@ -984,7 +1011,7 @@ void PortGlfwPet::ApplyZoom(float zoom)
     int nw = (int)(_renderW * _zoom + 0.5f) & ~1;
     int nh = (int)(_renderH * _zoom + 0.5f) & ~1;
     int mx = 0, my = 0, mw = 0, mh = 0;
-    glfwGetMonitorWorkarea(glfwGetPrimaryMonitor(), &mx, &my, &mw, &mh);
+    WindowWorkarea(&mx, &my, &mw, &mh);
     if (nw > mw) { const float k = (float)mw / (float)nw; nw = mw; nh = (int)(nh * k); }
     if (nh > mh) { const float k = (float)mh / (float)nh; nh = mh; nw = (int)(nw * k); }
     if (nw < 2) nw = 2;
@@ -999,6 +1026,7 @@ void PortGlfwPet::ApplyZoom(float zoom)
     glfwSetWindowSize(_win, _w, _h);
     glfwSetWindowPos(_win, _winX, _winY);
     _shapeCountdown = 0;
+    _anchorOk = false;   // 窗口尺寸变了：气泡锚点得按新的轮廓重算
     _fxBufW = 0;   // 特效/缩放缓冲下一帧重分配
 }
 
@@ -1269,7 +1297,7 @@ void PortGlfwPet::LaunchUi(int page)
 void PortGlfwPet::PushRightMenu(int rootX, int rootY)
 {
     int mx = 0, my = 0, mw = 0, mh = 0;
-    glfwGetMonitorWorkarea(glfwGetPrimaryMonitor(), &mx, &my, &mw, &mh);
+    WindowWorkarea(&mx, &my, &mw, &mh);
     const unsigned long t = (unsigned long)(plat::MonoNow() * 1000.0);
     char b[240];
     snprintf(b, sizeof(b), "{\"event\":\"ui_menu\",\"x\":%d,\"y\":%d,\"scale\":%.2f,\"time\":%lu,\"wa\":[%d,%d,%d,%d]}",
@@ -1408,19 +1436,170 @@ bool PortGlfwPet::EnsureBubbleWindow(int w, int h)
     return true;
 }
 
-/** 气泡锚点：小圆点末端 = 角色头顶（窗口顶部上方一点）。
- *  单独抽出来是因为它**每帧都要重算**——角色被拖动 / 缩放后气泡得跟着走，
- *  只在 ShowBubble 里算一次的话，拖着角色时气泡会留在原地。*/
+/** 窗口所在显示器的工作区。
+ *  原来各处都写 glfwGetPrimaryMonitor()：双屏时角色能拖到第二块屏（拖动不做钳制），
+ *  但气泡/缩放/菜单全被按主屏工作区钳回去——气泡就"留在主屏"跟不上。窗口模式没有
+ *  glfwGetWindowMonitor（返回 NULL），按窗口中心落在哪块显示器来选。*/
+void PortGlfwPet::WindowWorkarea(int* mx, int* my, int* mw, int* mh)
+{
+    GLFWmonitor* mon = glfwGetWindowMonitor(_win);
+    if (mon == NULL)
+    {
+        mon = glfwGetPrimaryMonitor();
+        const int cx = _winX + _w / 2, cy = _winY + _h / 2;
+        int n = 0;
+        GLFWmonitor** mons = glfwGetMonitors(&n);
+        for (int i = 0; i < n; ++i)
+        {
+            int px = 0, py = 0;
+            glfwGetMonitorPos(mons[i], &px, &py);
+            const GLFWvidmode* vm = glfwGetVideoMode(mons[i]);
+            if (vm != NULL && cx >= px && cx < px + vm->width && cy >= py && cy < py + vm->height)
+            {
+                mon = mons[i];
+                break;
+            }
+        }
+    }
+    if (mon == NULL)
+    {
+        *mx = 0; *my = 0; *mw = 0; *mh = 0;
+        return;
+    }
+    glfwGetMonitorWorkarea(mon, mx, my, mw, mh);
+}
+
+/** 角色轮廓（窗口坐标）：top = 最顶不透明行；hMinX/hMaxX/bandH = 头部带（顶部 1/8，含
+ *  头发/双马尾）的左右与高度——气泡锚点钉在这条带中线那一行的轮廓边缘上。
+ *  算法与 X11 端口的 UpdateInputShape 对齐（那边有 8x8 块矩形可复用，这边直接扫 _lastFrame
+ *  的 alpha）。0.5s 缓存一次——只在气泡要锚定时用，逐帧全扫没必要。*/
+bool PortGlfwPet::CharMetrics(int* top, int* hMinX, int* hMaxX, int* bandH)
+{
+    const double now = plat::MonoNow();
+    if (!_cmOk || now - _cmAt >= 0.5)
+    {
+        _cmAt = now;
+        _cmOk = false;
+        if (_lastFrame != NULL && _w > 0 && _h > 0)
+        {
+            int t = -1, b = -1;
+            for (int y = 0; y < _h; y += 2)
+            {
+                int rowMin = -1, rowMax = -1;
+                const uint32_t* row = _lastFrame + (size_t)y * _w;
+                for (int x = 0; x < _w; x += 2)
+                {
+                    if (((row[x] >> 24) & 0xFF) > 0x20)
+                    {
+                        if (rowMin < 0) rowMin = x;
+                        rowMax = x;
+                    }
+                }
+                if (rowMin < 0) continue;
+                if (t < 0) t = y;
+                b = y;
+            }
+            if (t >= 0 && b > t)
+            {
+                const int band = t + (b - t) / 8;   // 顶部 1/8 = 头部带
+                const int midY = t + (b - t) / 16;  // 带的中线：小圆点从这一行的轮廓边缘"长出来"
+                int hm = _w, hx = -1, mm = _w, mx2 = -1;
+                for (int y = t; y <= band && y < _h; y += 2)
+                {
+                    const uint32_t* row = _lastFrame + (size_t)y * _w;
+                    for (int x = 0; x < _w; x += 2)
+                    {
+                        if (((row[x] >> 24) & 0xFF) > 0x20)
+                        {
+                            if (x < hm) hm = x;
+                            if (x > hx) hx = x;
+                            if (y <= midY + 1 && y + 1 >= midY)
+                            {
+                                if (x < mm) mm = x;
+                                if (x > mx2) mx2 = x;
+                            }
+                        }
+                    }
+                }
+                _cmTop = t;
+                _cmHeadMinX = hm <= hx ? hm : 0;
+                _cmHeadMaxX = hm <= hx ? hx : _w;
+                _cmBandH = std::max(1, (b - t) / 8);
+                _cmMidMinX = mx2 >= mm ? mm : _cmHeadMinX;
+                _cmMidMaxX = mx2 >= mm ? mx2 : _cmHeadMaxX;
+                _cmOk = true;
+            }
+        }
+    }
+    if (!_cmOk) return false;
+    *top = _cmTop;
+    *hMinX = _cmHeadMinX;
+    *hMaxX = _cmHeadMaxX;
+    *bandH = _cmBandH;
+    return true;
+}
+
+/** 气泡锚点：小圆点末端（tipX/tipY）落在**头部带中线那一行的轮廓边缘**——气泡挂在角色
+ *  左上/右上角，圆点正好从头发/发带那儿"长出来"（不是吊在正头顶上方）。
+ *  锚点只在 ShowBubble / 缩放后算一次就**冻结**（存成窗口相对坐标 `_anchorX/_anchorY`），
+ *  之后每帧只随窗口位置平移：拖动角色气泡跟着走，模型自己晃头不带气泡乱抖。
+ *  没有轮廓（还没有帧、或纯色帧）时不冻结，下一帧再试——不然会永远停在近似位置。*/
 void PortGlfwPet::AnchorBubble()
 {
     int mx = 0, my = 0, mw = 0, mh = 0;
-    glfwGetMonitorWorkarea(glfwGetPrimaryMonitor(), &mx, &my, &mw, &mh);
-    const int headX = _winX + _w / 2 + _side * (_w / 6);
-    const int headY = _winY + (int)(_h * 0.14f);
-    _bubX = _side < 0 ? headX - _bubW + (int)(6 * _bs) : headX - (int)(6 * _bs);
-    _bubY = headY - _bubH + (int)(4 * _bs);
-    _bubX = std::max(mx, std::min(_bubX, mx + mw - _bubW));
-    _bubY = std::max(my, std::min(_bubY, my + mh - _bubH));
+    WindowWorkarea(&mx, &my, &mw, &mh);
+    if (!_anchorOk)
+    {
+        int top = 0, hMinX = 0, hMaxX = 0, bandH = 0;
+        const bool box = CharMetrics(&top, &hMinX, &hMaxX, &bandH);
+        const int gap = (int)(BubbleGapPx() * _bs + 0.5f);
+        if (box)
+        {
+            const int edge = (_side < 0) ? _cmMidMinX : _cmMidMaxX;   // 头部带中线那一行的轮廓边缘
+            _anchorX = edge + _side * gap;                            // 圆点末端正好从头发/发带那儿出来
+            _anchorY = top + bandH / 2;
+            _aTop = top;
+            _aBot = top + bandH;
+            _aMinX = hMinX;
+            _aMaxX = hMaxX;
+            _anchorOk = true;
+        }
+        else
+        {
+            _anchorX = _w / 2 + _side * (int)(30 * _bs);   // 没有轮廓：退回窗口近似（每帧再试）
+            _anchorY = (int)(_h * 0.14f);
+        }
+    }
+    _anchorBox = _anchorOk;
+    // 冻结的是"窗口相对"锚点：拖动/缩放时它自己不动，位置由窗口位置带出来
+    const int wantX = _winX + _anchorX - _bg.tipX;
+    const int wantY = _winY + _anchorY - _bg.tipY;
+    _bubX = std::max(mx, std::min(wantX, mx + mw - _bubW));
+    _bubY = std::max(my, std::min(wantY, my + mh - _bubH));
+    // 兜底：只有被屏幕边钳回来（贴着工作区边缘）才启用——这时可能压到头上，就整体顶到
+    // 头顶上方（再不行挪到外侧）。正常位置（锚点在头发边上）不动，锚点也不会因此横跳。
+    if (_anchorBox && (_bubX != wantX || _bubY != wantY))
+    {
+        const int gap = (int)(BubbleGapPx() * _bs + 0.5f);
+        const int cTop = _winY + _aTop, cBot = _winY + _aBot;
+        const int cMinX = _winX + _aMinX, cMaxX = _winX + _aMaxX;
+        if (_bubX < cMaxX + gap && _bubX + _bubW > cMinX - gap && _bubY < cBot + gap && _bubY + _bubH > cTop - gap)
+        {
+            const int up = cTop - gap - _bubH;
+            if (up >= my)
+            {
+                _bubY = up;
+            }
+            else if (_side < 0)
+            {
+                _bubX = std::max(mx, cMinX - gap - _bubW);
+            }
+            else
+            {
+                _bubX = std::min(mx + mw - _bubW, cMaxX + gap);
+            }
+        }
+    }
 }
 
 void PortGlfwPet::ShowBubble(const char* text, const char* const* options, int optionCount, float seconds)
@@ -1431,7 +1610,7 @@ void PortGlfwPet::ShowBubble(const char* text, const char* const* options, int o
         return;
     }
     int mx = 0, my = 0, mw = 0, mh = 0;
-    glfwGetMonitorWorkarea(glfwGetPrimaryMonitor(), &mx, &my, &mw, &mh);
+    WindowWorkarea(&mx, &my, &mw, &mh);
     // 缩放只用来定字号；**气泡几何整体跟字号走**（_bs = 字号 / 基准字号）：
     // bubble_px 调大时行高、胶囊、留白、宽度预算一起长，不会"字大气球小"（字挤出行外）。
     _bubFontPx = BubbleBasePx() * std::min(2.0f, std::max(0.5f, _zoom)) * _ui;
@@ -1463,7 +1642,8 @@ void PortGlfwPet::ShowBubble(const char* text, const char* const* options, int o
     }
     _bubW = _bg.W;
     _bubH = _bg.H;
-    AnchorBubble();   // 位置：小圆点末端 = 头顶（窗口顶部上方一点）
+    _anchorOk = false;   // 新气泡：锚点重新算一次（几何/缩放可能变了），再冻结
+    AnchorBubble();      // 位置：小圆点末端钉在头部带外侧偏上（角色左上/右上角）
     const double now = plat::MonoNow();
     _bubShownAt = now;
     _bubUntil = now + (double)seconds;

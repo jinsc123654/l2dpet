@@ -160,6 +160,14 @@ int PetRuntime::Run()
             snprintf(bpx, sizeof(bpx), "%d", (int)(bp + 0.5f));
             plat::SetEnv("L2DPET_BUBBLE_PX", bpx);
         }
+        // 气泡与角色的间距（config 的 bubble_gap）：与字号同一套环境变量通道
+        const csmFloat32 bg = player.Cfg("bubble_gap");
+        if (bg >= 0.0f && bg <= 120.0f)
+        {
+            char bgp[32];
+            snprintf(bgp, sizeof(bgp), "%d", (int)(bg + 0.5f));
+            plat::SetEnv("L2DPET_BUBBLE_GAP", bgp);
+        }
     }
 
     if (opt->model3Path == NULL)

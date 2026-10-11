@@ -334,6 +334,9 @@ inline void LayoutBubble(BubbleGeom* g, const std::string& text, const char* con
     g->d1y = by + ny * (lw + d1r + 7.0f * s);
     g->d2x = g->d1x + nx * (d1r + d2r + 9.0f * s);
     g->d2y = g->d1y + ny * (d1r + d2r + 9.0f * s);
+    // 小圆点末端（= 调用方的锚点）：不填就只能拿 W/H 去凑，横竖两个方向都会偏
+    g->tipX = (int)(g->d2x + dir * d2r);
+    g->tipY = (int)(g->d2y + d2r);
     g->contentX = (int)(g->ecx - g->cw * 0.5f);
     g->contentY = (int)(g->ecy - g->ch * 0.5f);
 }
@@ -355,6 +358,9 @@ inline void MirrorBubble(BubbleGeom* g, float s)
     g->d1y = by + ny * (lw + d1r + 7.0f * s);
     g->d2x = g->d1x + nx * (d1r + d2r + 9.0f * s);
     g->d2y = g->d1y + ny * (d1r + d2r + 9.0f * s);
+    // 镜像后锚点也得跟着翻到另一侧（否则 tipX/tipY 还指着镜像前的小圆点）
+    g->tipX = (int)(g->d2x + dir * d2r);
+    g->tipY = (int)(g->d2y + d2r);
     g->contentX = (int)(g->ecx - g->cw * 0.5f);
     g->contentY = (int)(g->ecy - g->ch * 0.5f);
 }

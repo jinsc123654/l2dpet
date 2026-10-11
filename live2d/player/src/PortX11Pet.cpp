@@ -959,12 +959,58 @@ public:
             _bubRedraw = true;
             if (resized)
             {
-                const int faceX = _headX + _side * (_charW > 0 ? _charW / 6 : (int)(30 * _bs));
-                const int faceY = _headY - (int)(6 * _bs);
+                // 锚点 = 小圆点末端（tip）落在**头部带中线那一行的轮廓边缘**：气泡挂在角色
+                // 左上/右上角，圆点正好从头发/发带那儿"长出来"（不是吊在正头顶上方）。没有轮廓
+                // （空帧）时退回窗口近似值。
+                // 位置在这里定一次就**冻结**（存成窗口相对偏移）：之后只随窗口拖动，模型自己晃头
+                // 不带气泡乱动——每帧按实时轮廓重算会让气泡跟着呼吸/眨眼抖。
+                // gap 是逻辑像素：× _bs（缩放）× _ui（屏幕缩放）——角色大小随这两者变。
+                const float gap = BubbleGapPx() * _bs * _ui;
+                int faceX, faceY;
+                if (_charBoxOk)
+                {
+                    const int edge = (_side < 0) ? _bandMidMinX : _bandMidMaxX;
+                    faceX = edge + _side * (int)(gap + 0.5f);
+                    faceY = _charTop + (int)(_headBandH * 0.5f);
+                }
+                else
+                {
+                    faceX = _w / 2 + _side * (int)(30 * _bs);
+                    faceY = (int)(_h * 0.14f);
+                }
                 _bubOffX = faceX - _tipX;
                 _bubOffY = faceY - _tipY;
+                // 兜底：窗口贴着屏幕边、气泡被钳回角色身上（压到头带）时，整体顶到头顶上方，
+                // 再不行挪到外侧——正常情况（锚点在头发边上）不会走到这里。
+                const int bx = _winX + _bubOffX, by = _winY + _bubOffY;
+                const int sw0 = DisplayWidth(_dpy, DefaultScreen(_dpy)), sh0 = DisplayHeight(_dpy, DefaultScreen(_dpy));
+                const int cx = std::max(0, std::min(bx, sw0 - _bwW));
+                const int cy = std::max(0, std::min(by, sh0 - _bwH));
+                if (_charBoxOk && (cx != bx || cy != by))
+                {
+                    const int hTop = _winY + _charTop, hBot = hTop + _headBandH;
+                    const int hMinX = _winX + _headMinX, hMaxX = _winX + _headMaxX;
+                    const int pad = (int)(gap + 0.5f);
+                    if (cx < hMaxX + pad && cx + _bwW > hMinX - pad && cy < hBot + pad && cy + _bwH > hTop - pad)
+                    {
+                        const int up = hTop - pad - _bwH;
+                        if (up >= 0)
+                        {
+                            _bubOffY = up - _winY;
+                        }
+                        else if (_side < 0)
+                        {
+                            _bubOffX = std::max(0, hMinX - pad - _bwW) - _winX;
+                        }
+                        else
+                        {
+                            _bubOffX = std::min(sw0 - _bwW, hMaxX + pad) - _winX;
+                        }
+                    }
+                }
             }
         }
+        // 每帧只做"别跑出屏幕"的钳制：锚点已冻结，模型怎么动气泡都不动，只随窗口拖。
         const int sw = DisplayWidth(_dpy, DefaultScreen(_dpy)), shh = DisplayHeight(_dpy, DefaultScreen(_dpy));
         int x = _winX + _bubOffX, y = _winY + _bubOffY;
         x = std::max(0, std::min(x, sw - _bwW));
@@ -1627,6 +1673,18 @@ private:
         return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
     }
 
+    /** 气泡与角色轮廓的最小间距（像素，未乘缩放）：L2DPET_BUBBLE_GAP 由桌宠从 config 的
+     *  bubble_gap 推过来（与字号同一套环境变量通道，见 PortGlfwPet::BubbleBasePx）。*/
+    static float BubbleGapPx()
+    {
+        if (const char* e = getenv("L2DPET_BUBBLE_GAP"))
+        {
+            const float v = (float)atof(e);
+            if (v >= 0.0f && v <= 120.0f) return v;
+        }
+        return 0.0f;
+    }
+
     /** 输入区域 = 有像素（alpha > 0x20）的 8x8 块（按行合并成矩形）；顺便估头部位置（气泡锚点）*/
     void UpdateInputShape(const uint32_t* px)
     {
@@ -1686,17 +1744,40 @@ private:
             }
             const int charH = bot - top;
             long sx = 0, n = 0;
+            const int bandH = std::max(1, charH / 8);
+            const int bandY = top + bandH;
+            const int midY = top + bandH / 2;     // 头部带中线：气泡小圆点从这一行"长出来"
+            int hMinX = 1 << 30, hMaxX = -1;      // 头部带（顶部 1/8）的左右
+            int mMinX = 1 << 30, mMaxX = -1;      // 中线那一行的轮廓左右（= 头发/发带边缘）
             for (size_t i = 0; i < rects.size(); ++i)
             {
-                if (rects[i].y < top + charH / 8)
+                if (rects[i].y < bandY)
                 {
                     sx += rects[i].x + rects[i].width / 2;
                     ++n;
+                    hMinX = std::min(hMinX, (int)rects[i].x);
+                    hMaxX = std::max(hMaxX, (int)rects[i].x + (int)rects[i].width);
+                }
+                if ((int)rects[i].y <= midY && midY < (int)rects[i].y + (int)rects[i].height)
+                {
+                    mMinX = std::min(mMinX, (int)rects[i].x);
+                    mMaxX = std::max(mMaxX, (int)rects[i].x + (int)rects[i].width);
                 }
             }
             _headX = n > 0 ? (int)(sx / n) : (minX + maxX) / 2;
             _headY = top + charH * 11 / 100;
-            _charW = maxX - minX;
+            _charTop = top;          // 轮廓顶：气泡锚点按它算
+            _headMinX = n > 0 ? hMinX : minX;
+            _headMaxX = n > 0 ? hMaxX : maxX;
+            _headBandH = bandH;
+            _bandMidMinX = mMaxX >= mMinX ? mMinX : _headMinX;
+            _bandMidMaxX = mMaxX >= mMinX ? mMaxX : _headMaxX;
+            if (!_charBoxOk && _bubActive) _bubDirty = true;   // 首次扫到轮廓：把气泡锚点补算一次
+            _charBoxOk = true;
+        }
+        else
+        {
+            _charBoxOk = false;      // 没有可用轮廓（空帧）：气泡退回窗口近似锚点
         }
         if (_appliedPass == 1)
         {
@@ -1731,7 +1812,7 @@ private:
     int _savedL = -1, _savedB = -1;        // 存档位置（SetSavedPlacement）                    // 整窗缩放
     int _srcW = 0, _srcH = 0;              // 播放器渲染帧尺寸
     bool _hidden = false;
-    int _headX = 180, _headY = 80, _charW = 0;   // 角色头部（窗口坐标；输入 shape 扫描时估）
+    int _headX = 180, _headY = 80;         // 角色头部（窗口坐标；输入 shape 扫描时估）
     // 窗口类配置
     float _cfgOpacity = 1.0f, _appliedOpacity = -1.0f;
     bool _cfgTop = true, _cfgPass = false, _cfgLock = false;
@@ -1772,6 +1853,10 @@ private:
     int _bwX = 0, _bwY = 0, _bwW = 0, _bwH = 0;
     int _side = -1;                        // -1 = 气泡在头部左侧，+1 = 右侧
     int _tipX = 0, _tipY = 0;              // 小圆点末端（气泡窗口坐标）
+    int _charTop = 0;                      // 角色轮廓顶（窗口坐标；UpdateInputShape 扫）
+    int _headMinX = 0, _headMaxX = 0, _headBandH = 1; // 头部带（顶部 1/8）的左右与高度
+    int _bandMidMinX = 0, _bandMidMaxX = 0;           // 头部带中线那一行的轮廓左右：小圆点从这里出来
+    bool _charBoxOk = false;               // bbox 是否有效（空帧时 false）
     int _hover = -1, _bubLastHover = -2;
     float _bubLastA = -1.0f;
     bool _bubDirty = true, _bubRedraw = false;
