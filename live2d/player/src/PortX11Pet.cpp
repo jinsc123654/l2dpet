@@ -155,8 +155,12 @@ public:
                              XInternAtom(_dpy, "_NET_WM_STATE_SKIP_PAGER", False) };
             XChangeProperty(_dpy, _win, state, XA_ATOM, 32, PropModeReplace, (unsigned char*)vals, 3);
             const Atom type = XInternAtom(_dpy, "_NET_WM_WINDOW_TYPE", False);
-            Atom util = XInternAtom(_dpy, "_NET_WM_WINDOW_TYPE_UTILITY", False);
-            XChangeProperty(_dpy, _win, type, XA_ATOM, 32, PropModeReplace, (unsigned char*)&util, 1);
+            // 类型用 DOCK，不用 UTILITY：桌宠是"桌面挂件"，要的是**按显示桌面（Super+D）时也留在桌面上**。
+            // WM 不会最小化 dock 类窗口（GNOME/Mutter 上 Ubuntu 的 Dock 就是这么活下来的），而 UTILITY
+            // 会被一起最小化——只剩 override-redirect 的气泡孤零零挂在桌面上（实测到的现象）。
+            // 代价：dock 在多数 WM 里总是置顶、跟随所有工作区，"总在最前"开关在 GNOME 上不再有区别。
+            Atom dock = XInternAtom(_dpy, "_NET_WM_WINDOW_TYPE_DOCK", False);
+            XChangeProperty(_dpy, _win, type, XA_ATOM, 32, PropModeReplace, (unsigned char*)&dock, 1);
         }
         {
             XSizeHints sh;
@@ -916,6 +920,20 @@ public:
         {
             return;
         }
+        // 桌宠窗口不在屏幕上（被窗口管理器最小化、"显示桌面"Super+D、托盘隐藏）→ 气泡一起收掉。
+        // 气泡是 override-redirect 窗口，WM 不会连它一起最小化，不收就会剩一个气泡孤零零挂在桌面上
+        // （实测：按"显示桌面"后模型没了、气泡还在）。窗口回来后由下一条消息重新弹。
+        if (_hidden || !_winMapped)
+        {
+            if (_bubActive || _bwMapped)
+            {
+                _bubActive = false;
+                _bubFadeOut = -1.0;
+                XUnmapWindow(_dpy, _bw);
+                _bwMapped = false;
+            }
+            return;
+        }
         if (!_bubActive)
         {
             if (_bwMapped)
@@ -1136,6 +1154,12 @@ public:
         if (_dpy == NULL || text == NULL || text[0] == '\0' || seconds <= 0.0f)
         {
             HideBubble();
+            return;
+        }
+        // 窗口不在屏幕上（最小化/显示桌面/托盘隐藏）就不弹：气泡是 override-redirect 窗口，
+        // 会孤零零留在桌面上（见 UpdateBubble 的说明）
+        if (_hidden || !_winMapped)
+        {
             return;
         }
         SyncBs();
@@ -1646,6 +1670,14 @@ private:
                     _winY = e.xconfigure.y;
                 }
                 break;
+            // 窗口在不在屏幕上：WM 最小化/显示桌面会 Unmap 我们（客户端自己 hide 也走同一条），
+            // 记下来给气泡用（气泡是 override-redirect 窗口，WM 不会连它一起收）
+            case MapNotify:
+                if (e.xmap.window == _win) _winMapped = true;
+                break;
+            case UnmapNotify:
+                if (e.xunmap.window == _win) _winMapped = false;
+                break;
             case KeyPress:
                 if (XLookupKeysym(&e.xkey, 0) == XK_Escape)
                 {
@@ -1812,6 +1844,7 @@ private:
     int _savedL = -1, _savedB = -1;        // 存档位置（SetSavedPlacement）                    // 整窗缩放
     int _srcW = 0, _srcH = 0;              // 播放器渲染帧尺寸
     bool _hidden = false;
+    bool _winMapped = false;               // 窗口在屏幕上（Map/UnmapNotify 维护）：气泡跟着它收放
     int _headX = 180, _headY = 80;         // 角色头部（窗口坐标；输入 shape 扫描时估）
     // 窗口类配置
     float _cfgOpacity = 1.0f, _appliedOpacity = -1.0f;

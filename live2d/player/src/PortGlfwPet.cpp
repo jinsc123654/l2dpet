@@ -1609,6 +1609,12 @@ void PortGlfwPet::ShowBubble(const char* text, const char* const* options, int o
         HideBubble();
         return;
     }
+    // 窗口最小化/隐藏时不弹（同 BubbleTick）：否则会有一个气泡孤零零留在桌面上
+    if (_hidden || glfwGetWindowAttrib(_win, GLFW_ICONIFIED))
+    {
+        HideBubble();
+        return;
+    }
     int mx = 0, my = 0, mw = 0, mh = 0;
     WindowWorkarea(&mx, &my, &mw, &mh);
     // 缩放只用来定字号；**气泡几何整体跟字号走**（_bs = 字号 / 基准字号）：
@@ -1643,7 +1649,7 @@ void PortGlfwPet::ShowBubble(const char* text, const char* const* options, int o
     _bubW = _bg.W;
     _bubH = _bg.H;
     _anchorOk = false;   // 新气泡：锚点重新算一次（几何/缩放可能变了），再冻结
-    AnchorBubble();      // 位置：小圆点末端钉在头部带外侧偏上（角色左上/右上角）
+    AnchorBubble();      // 位置：小圆点末端钉在头部带中线那一行的轮廓边缘（角色左上/右上角）
     const double now = plat::MonoNow();
     _bubShownAt = now;
     _bubUntil = now + (double)seconds;
@@ -1681,6 +1687,20 @@ bool PortGlfwPet::PollChoice(int* index)
 void PortGlfwPet::BubbleTick()
 {
     if (_bw == NULL) return;
+    // 窗口被最小化（Windows 的 Win+D / 任务栏最小化；Linux 下 WM 的"显示桌面"= WM_STATE Iconic）
+    // 或托盘隐藏 → 气泡一起收掉。气泡是没有任务栏项的工具窗，"显示桌面"不动它，不收就会剩一个
+    // 气泡孤零零挂在桌面上（实测）。窗口回来后由下一条消息重新弹。
+    if (_hidden || glfwGetWindowAttrib(_win, GLFW_ICONIFIED))
+    {
+        if (_bubActive || _bubMapped)
+        {
+            _bubActive = false;
+            _bubFadeOut = -1.0;
+            _bubMapped = false;
+            glfwHideWindow(_bw);
+        }
+        return;
+    }
     const double now = plat::MonoNow();
     if (!_bubActive)
     {
