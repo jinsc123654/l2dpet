@@ -49,30 +49,45 @@ p = subprocess.Popen(["setsid", player, model, "0", "0.0333", "--port", "headles
                      env=env, stdout=log, stderr=subprocess.STDOUT)
 
 
-def rpc(obj, sock):
-    sock.sendall((json.dumps(obj) + "\n").encode())
-    return sock.makefile().readline()
+def connect():
+    """Authenticate before anything else: the control port refuses untokened requests."""
+    from pathlib import Path
+    token = (Path.home() / ".config/l2dpet" / ("control-token-%d" % port)).read_text(encoding="ascii").strip()
+    sock = socket.create_connection(("127.0.0.1", port), timeout=3)
+    stream = sock.makefile("rwb")
+    stream.write((json.dumps({"cmd": "auth", "token": token}) + "\n").encode())
+    stream.flush()
+    if json.loads(stream.readline()).get("ok") is not True:
+        raise SystemExit("[x] 控制端口认证失败：凭据文件对不上（%s）" % port)
+    return sock, stream
+
+
+def rpc(obj, sock, stream):
+    stream.write((json.dumps(obj) + "\n").encode())
+    stream.flush()
+    return stream.readline().decode("utf-8", "replace")
 
 
 deadline = time.time() + 60
 while time.time() < deadline:          # 等播放器把控制端口起起来
     try:
-        s = socket.create_connection(("127.0.0.1", port), timeout=3)
+        s, sstream = connect()
         break
-    except OSError:
+    except (OSError, ValueError):
         time.sleep(0.5)
 else:
     print("[x] 播放器没起来")
     p.kill()
     sys.exit(1)
 
-sub = socket.create_connection(("127.0.0.1", port), timeout=3)
-sub.sendall(b'{"cmd":"subscribe","role":"ui"}\n')
-sub.makefile().readline()              # 订阅回执
+sub, substream = connect()
+substream.write(b'{"cmd":"subscribe","role":"ui"}\n')
+substream.flush()
+substream.readline()                   # 订阅回执
 cmd = {"cmd": "probe", "all": True}
 if phys:
     cmd["phys"] = True
-line = rpc(cmd, s)
+line = rpc(cmd, s, sstream)
 print("[i] probe 回执：", (line or "").strip()[:120])
 if '"ok":true' not in (line or ""):
     print("[x] probe 被拒")
@@ -102,7 +117,7 @@ except socket.timeout:
     print("[x] 等 probe 完成超时（%gs）" % wait_s)
 
 try:
-    rpc({"cmd": "quit"}, s)
+    rpc({"cmd": "quit"}, s, sstream)
     p.wait(timeout=10)
 except Exception:
     p.kill()

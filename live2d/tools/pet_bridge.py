@@ -35,9 +35,31 @@ def port_number(value):
     return port
 
 
+def authenticate(sock, port, home=None):
+    """Private per-port capability; consumed locally, never copied into notifications or logs."""
+    path = Path(home) if home is not None else Path.home()
+    token = (path / '.config/l2dpet' / f'control-token-{port}').read_text(encoding='ascii').strip()
+    if len(token) != 64 or any(c not in '0123456789abcdef' for c in token):
+        raise ValueError('invalid local control token')
+    sock.sendall((json.dumps({'cmd': 'auth', 'token': token}) + '\n').encode())
+    raw = bytearray()
+    while len(raw) < 256:
+        byte = sock.recv(1)
+        if not byte:
+            raise ValueError('control authentication failed')
+        if byte == b'\n':
+            reply = json.loads(raw)
+            if not isinstance(reply, dict) or reply.get('ok') is not True:
+                raise ValueError('control authentication failed')
+            return
+        raw.extend(byte)
+    raise ValueError('invalid authentication reply')
+
+
 def pet_request(port, command):
     with socket.create_connection(('127.0.0.1', port), timeout=3) as sock:
         sock.settimeout(3)
+        authenticate(sock, port)
         sock.sendall((json.dumps(command, ensure_ascii=False) + '\n').encode('utf-8'))
         with sock.makefile('rb') as stream:
             raw = stream.readline(MAX_LINE + 1)

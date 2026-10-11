@@ -14,6 +14,7 @@ import os
 import pathlib
 import socket
 import sys
+from pet_bridge import authenticate
 
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("PET_PORT", "23333"))
@@ -22,6 +23,7 @@ PORT = int(os.environ.get("PET_PORT", "23333"))
 class Pet:
     def __init__(self):
         self.sock = socket.create_connection((HOST, PORT), timeout=5)
+        authenticate(self.sock, PORT)
         self.buf = b""
         self.seq = 0
         self.model = None

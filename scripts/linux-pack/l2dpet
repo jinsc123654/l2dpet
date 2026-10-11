@@ -373,10 +373,19 @@ cmd_open() {
     fi
     python3 - "$PORT" "$page" <<'PY' || say "没连上桌宠（它在跑吗？l2dpet status）"
 import json, socket, sys
+from pathlib import Path
 port, page = int(sys.argv[1]), int(sys.argv[2])
+# 控制端口要私有凭据（见 CtlServer）：没有它桌宠会直接回 unauthorized。
+token = (Path.home() / ".config/l2dpet" / ("control-token-%d" % port)).read_text(encoding="ascii").strip()
 s = socket.create_connection(("127.0.0.1", port), timeout=5)
-s.sendall((json.dumps({"cmd": "panel", "page": page}) + "\n").encode())
-print(s.makefile().readline().strip())
+stream = s.makefile("rwb")
+stream.write((json.dumps({"cmd": "auth", "token": token}) + "\n").encode())
+stream.flush()
+if json.loads(stream.readline()).get("ok") is not True:
+    raise SystemExit("控制端口认证失败（凭据文件对不上？）")
+stream.write((json.dumps({"cmd": "panel", "page": page}) + "\n").encode())
+stream.flush()
+print(stream.readline().decode().strip())
 PY
 }
 

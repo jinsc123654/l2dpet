@@ -2,6 +2,11 @@
  * CtlServer.cpp — 本机控制端口实现（见 CtlServer.hpp）
  */
 #include "CtlServer.hpp"
+#include "Platform.h"
+#include "JsonLite.h"
+#include <random>
+#include <atomic>
+#include <condition_variable>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -44,7 +49,10 @@ const size_t kMaxConns = 32;         // 同时连接上限（UI 2 条 + agent + 
 struct CtlServer::Impl
 {
     CtlSockT listenFd = (CtlSockT)-1;
-    bool running = false;
+    std::atomic<bool> running{ false };
+    std::string token;
+    std::condition_variable readersDone;
+    size_t readers = 0;
     std::thread acceptThread;
     std::mutex mu;
     std::deque<std::pair<int, std::string> > inbox;
@@ -55,6 +63,7 @@ struct CtlServer::Impl
 
     void ReadLoop(int conn, CtlSockT fd)
     {
+        bool authenticated = false;
         std::string acc;
         char buf[4096];
 
@@ -83,6 +92,28 @@ struct CtlServer::Impl
                 {
                     continue;
                 }
+                if (line.size() > kMaxLine) { rejected = true; break; }
+                if (!authenticated)
+                {
+                    jsonlite::Value auth;
+                    const bool parsed = jsonlite::parse(line.c_str(), line.size(), auth, NULL);
+                    const std::string supplied = auth.get("token").strOr("");
+                    unsigned difference = supplied.size() == token.size() ? 0 : 1;
+                    for (size_t i = 0; i < token.size(); ++i)
+                        difference |= (unsigned char)token[i] ^ (i < supplied.size() ? (unsigned char)supplied[i] : 0);
+                    authenticated = parsed && std::string(auth.get("cmd").strOr("")) == "auth" && difference == 0;
+                    SendFd(fd, authenticated ? "{\"ok\":true,\"type\":\"auth\"}\n"
+                                             : "{\"ok\":false,\"code\":\"unauthorized\"}\n");
+                    if (!authenticated) { rejected = true; break; }
+                    // An authenticated idle client may keep its connection open.
+#ifdef _WIN32
+                    DWORD receiveTimeout = 0;
+#else
+                    timeval receiveTimeout{};
+#endif
+                    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&receiveTimeout, sizeof(receiveTimeout));
+                    continue;
+                }
                 // 只收 JSON 行：任何不以 '{' 开头的行（"POST / HTTP/1.1"、HTTP 头……）→ 立刻断开整个连接。
                 // 否则任意网页都能 fetch('http://127.0.0.1:<端口>', {method:'POST', body:'\n{"cmd":…}\n'})
                 // 跨协议打进来（头行解析失败被忽略，body 里的 JSON 行照样执行）——可改 LLM 接口地址把 API Key 送走、
@@ -109,12 +140,14 @@ struct CtlServer::Impl
             }
             if (acc.size() > kMaxLine)
             {
-                acc.clear();   // 超长行：丢弃（主机侧会收不到回复，自行超时）
+                break; // Disconnect oversized partial lines rather than accepting their suffix.
             }
         }
         std::lock_guard<std::mutex> lk(mu);
 
         fds.erase(conn);
+        --readers;
+        readersDone.notify_all();
         subscribed.erase(conn);
         uiConns.erase(conn);
         CTL_CLOSE(fd);
@@ -144,11 +177,13 @@ struct CtlServer::Impl
 #ifdef _WIN32
             const DWORD tvMs = 2000;
             setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tvMs, sizeof(tvMs));
+            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tvMs, sizeof(tvMs));
 #else
             timeval tv;
             tv.tv_sec = 2;
             tv.tv_usec = 0;
             setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 #endif
             int conn;
             {
@@ -161,6 +196,7 @@ struct CtlServer::Impl
                 }
                 conn = nextConn++;
                 fds[conn] = fd;
+                ++readers;
             }
             std::thread(&Impl::ReadLoop, this, conn, fd).detach();
         }
@@ -202,6 +238,21 @@ CtlServer::~CtlServer()
 
 bool CtlServer::Start(int port)
 {
+    const std::string root = plat::HomeDir() + "/.config/l2dpet";
+    if (!plat::CreateDir(root, true)) return false;
+    const std::string path = root + "/control-token-" + std::to_string(port);
+    try
+    {
+        std::random_device random;
+        const char* hex = "0123456789abcdef";
+        _impl->token.clear();
+        for (int i = 0; i < 32; ++i)
+        {
+            const unsigned char b = (unsigned char)random();
+            _impl->token += hex[b >> 4]; _impl->token += hex[b & 15];
+        }
+    }
+    catch (...) { return false; }
 #ifdef _WIN32
     WSADATA wsa;
     WSAStartup(MAKEWORD(2, 2), &wsa);
@@ -231,6 +282,12 @@ bool CtlServer::Start(int port)
         _impl->listenFd = (CtlSockT)-1;
         return false;
     }
+    // Write only after binding succeeds: another player on this port must not rotate our token.
+    if (!plat::WritePrivateFile(path, _impl->token))
+    {
+        CTL_CLOSE(_impl->listenFd); _impl->listenFd = (CtlSockT)-1;
+        return false;
+    }
     _impl->running = true;
     _impl->acceptThread = std::thread(&Impl::AcceptLoop, _impl);
     printf("[ctl] 控制端口 127.0.0.1:%d（JSON Lines，协议见 PROTOCOL-LLM.md）\n", port);
@@ -251,12 +308,13 @@ void CtlServer::Stop()
     {
         _impl->acceptThread.join();
     }
-    std::lock_guard<std::mutex> lk(_impl->mu);
+    std::unique_lock<std::mutex> lk(_impl->mu);
 
     for (std::map<int, CtlSockT>::iterator it = _impl->fds.begin(); it != _impl->fds.end(); ++it)
     {
         shutdown(it->second, SHUT_RDWR);
     }
+    _impl->readersDone.wait(lk, [this] { return _impl->readers == 0; });
 }
 
 bool CtlServer::Poll(int* conn, std::string* line)

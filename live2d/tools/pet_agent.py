@@ -104,6 +104,8 @@ LINES_PROMPT = """为一个 Live2D 桌宠写"被触碰时的即时台词库"。�
 class Conn:
     def __init__(self, port):
         self.sock = socket.create_connection((HOST, port), timeout=10)
+        from pet_bridge import authenticate
+        authenticate(self.sock, port)
         self.buf = b""
         self.lock = threading.Lock()
 

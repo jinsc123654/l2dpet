@@ -3,6 +3,10 @@
 
 #include <chrono>
 #include <cstring>
+#include <cstdlib>
+#include <fstream>
+#include <filesystem>
+#include "../player/src/JsonLite.h"
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -19,6 +23,52 @@ static void CloseSocket(SockT s) { closesocket(s); }
 using SockT = int;
 static void CloseSocket(SockT s) { close(s); }
 #endif
+
+static bool Authenticate(SockT sock, int port)
+{
+    const char* home = std::getenv("HOME");
+#ifdef _WIN32
+    if (std::getenv("USERPROFILE")) home = std::getenv("USERPROFILE");
+#endif
+    if (home == nullptr) return false;
+    std::ifstream file(std::filesystem::u8path(std::string(home) + "/.config/l2dpet/control-token-" + std::to_string(port)));
+    std::string token;
+    file >> token;
+    if (token.size() != 64 || token.find_first_not_of("0123456789abcdef") != std::string::npos) return false;
+    const std::string auth = "{\"cmd\":\"auth\",\"token\":\"" + token + "\"}\n";
+    size_t sent = 0;
+    while (sent < auth.size())
+    {
+#ifdef _WIN32
+        const int n = ::send(sock, auth.data() + sent, (int)(auth.size() - sent), 0);
+#else
+        const int n = (int)::send(sock, auth.data() + sent, auth.size() - sent, MSG_NOSIGNAL);
+#endif
+        if (n <= 0) return false;
+        sent += n;
+    }
+    std::string line;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (line.size() < 256 && std::chrono::steady_clock::now() < deadline)
+    {
+#ifdef _WIN32
+        WSAPOLLFD pfd{sock, POLLRDNORM, 0};
+        if (WSAPoll(&pfd, 1, 100) <= 0) continue;
+#else
+        pollfd pfd{sock, POLLIN, 0};
+        if (poll(&pfd, 1, 100) <= 0) continue;
+#endif
+        char byte;
+        if (recv(sock, &byte, 1, 0) != 1) return false;
+        if (byte == '\n')
+        {
+            jsonlite::Value reply;
+            return jsonlite::parse(line.c_str(), line.size(), reply, nullptr) && reply.get("ok").isBool() && reply.get("ok").b;
+        }
+        line += byte;
+    }
+    return false;
+}
 
 void PetLink::start(int port, std::function<void()> onChange)
 {
@@ -109,6 +159,7 @@ bool PetLink::connectOnce()
         CloseSocket(s);
         return false;
     }
+    if (!Authenticate(s, _port)) { CloseSocket(s); return false; }
     int one = 1;
     setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (const char*)&one, sizeof(one));
     _sock = (long long)s;
@@ -263,6 +314,7 @@ void PetLink::eventLoop()
             for (int i = 0; i < 10 && _running; ++i) std::this_thread::sleep_for(milliseconds(100));
             continue;
         }
+        if (!Authenticate(s, _port)) { CloseSocket(s); std::this_thread::sleep_for(milliseconds(1000)); continue; }
         const std::string sub = "{\"cmd\":\"subscribe\",\"role\":\"ui\"}\n";
 #ifdef _WIN32
         ::send(s, sub.data(), (int)sub.size(), 0);

@@ -8,6 +8,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import os
 from unittest.mock import patch
 
 BRIDGE = Path(__file__).with_name('pet_bridge.py')
@@ -24,6 +25,12 @@ class FakePet:
         self.sock.listen(5)
         self.sock.settimeout(.1)
         self.port = self.sock.getsockname()[1]
+        self.home = tempfile.TemporaryDirectory()
+        token = Path(self.home.name) / '.config/l2dpet' / f'control-token-{self.port}'
+        token.parent.mkdir(parents=True)
+        token.write_text('a' * 64)
+        self.environment = patch.dict(os.environ, HOME=self.home.name, USERPROFILE=self.home.name)
+        self.environment.start()
         self.stop = threading.Event()
         self.thread = threading.Thread(target=self.run)
         self.thread.start()
@@ -38,6 +45,9 @@ class FakePet:
             with conn:
                 conn.settimeout(3)
                 with conn.makefile('rb') as stream:
+                    auth = json.loads(stream.readline())
+                    assert auth == {'cmd': 'auth', 'token': 'a' * 64}
+                    conn.sendall(b'{"ok":true,"type":"auth"}\n')
                     request = json.loads(stream.readline())
                 self.requests.append(request)
                 if request['cmd'] == 'panel_state':
@@ -52,6 +62,8 @@ class FakePet:
         self.stop.set()
         self.thread.join(4)
         self.sock.close()
+        self.environment.stop()
+        self.home.cleanup()
 
 
 class IntegrationTests(unittest.TestCase):

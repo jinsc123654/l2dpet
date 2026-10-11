@@ -22,6 +22,8 @@ def free_port():
 
 
 def exercise(home, port, extra=(), env_port=None, new_port=None):
+    original_authenticate = bridge.authenticate
+    bridge.authenticate = lambda sock, active_port: original_authenticate(sock, active_port, home)
     env = os.environ.copy()
     env.update(HOME=str(home), USERPROFILE=str(home), L2D_NO_AGENT='1')
     env.pop('L2DPET_PORT', None)
@@ -105,6 +107,7 @@ def exercise(home, port, extra=(), env_port=None, new_port=None):
         finally:
             proc.terminate()
             proc.wait(timeout=10)
+            bridge.authenticate = original_authenticate
 
 
 with tempfile.TemporaryDirectory(prefix='l2dpet-external-') as temp:

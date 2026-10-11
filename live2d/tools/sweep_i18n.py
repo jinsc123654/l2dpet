@@ -29,6 +29,8 @@ MODEL_GLOB = "~/.local/share/l2dpet/models/*/*.model3.json"
 
 def rpc(obj):
     s = socket.create_connection(("127.0.0.1", PORT), timeout=8)
+    from pet_bridge import authenticate
+    authenticate(s, PORT, SWEEP_HOME)
     s.sendall((json.dumps(obj) + "\n").encode())
     line = s.makefile().readline()
     s.close()

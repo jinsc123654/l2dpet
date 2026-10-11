@@ -32,6 +32,8 @@
 
 读取 integration.json 的 host 和 port，建立本机 TCP 连接；发送一行 UTF-8 JSON，再读取一行响应。这不是 HTTP 服务。示例：
 
+连接后先认证：读取本用户 `~/.config/l2dpet/control-token-<活动端口>`，发送 `{"cmd":"auth","token":"<文件内容>"}` 并确认 `ok=true`，然后发送业务命令或订阅事件。Token 每次启动更新；不得放入注册文件、日志、提示词或聊天。它是本机控制凭据，不是 LLM API Key。随包面板和 `pet_bridge.py` 自动处理认证；旧客户端必须升级。服务拒绝未认证连接，监听范围仍为回环地址。
+
 ```json
 {"cmd":"companion_event","client_id":"codex","kind":"progress","message":"构建通过，正在检查安装包","event_id":"session/turn/build-passed"}
 ```

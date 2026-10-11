@@ -78,6 +78,8 @@ def find(name):
 
 def cmd(port, payload):
     c = socket.create_connection(("127.0.0.1", port), timeout=5)
+    from pet_bridge import authenticate
+    authenticate(c, port)
     c.sendall((json.dumps(payload) + "\n").encode())
     r = c.recv(4096).decode().strip()
     c.close()
@@ -110,6 +112,8 @@ class Mon:
 
     def __init__(self, port):
         self.sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+        from pet_bridge import authenticate
+        authenticate(self.sock, port)
         self.sock.sendall(b'{"cmd":"subscribe","role":"ui"}\n')
         self.sock.settimeout(0.2)
         self.buf = b""
