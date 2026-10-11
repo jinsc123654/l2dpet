@@ -102,7 +102,7 @@ int PetRuntime::Run()
     if (opt->portRequest != NULL && (strcmp(opt->portRequest, "pet") == 0 || strcmp(opt->portRequest, "glfwpet") == 0))
     {
         std::vector<std::string> lib;
-        ScanModelDir((plat::HomeDir() + "/.local/share/l2dpet/models").c_str(), &lib);
+        ScanModelDir(L2DPlayer::ModelsLibDir().c_str(), &lib);
         for (size_t i = 0; i < lib.size(); ++i)
         {
             const std::string rp = RealPath(lib[i].c_str());
@@ -445,6 +445,25 @@ int PetRuntime::Run()
     float petAwayT = 0.0f;  // 桌宠：鼠标离开人物多久了（-1 = 已放开视线）
     const bool isPetPort = (port != NULL && (strcmp(port->Name(), "pet") == 0
                                              || strcmp(port->Name(), "glfwpet") == 0));
+    if (!opt->ctlExplicit)
+    {
+        player.CfgLoad();   // Model loading reconstructs the player; reload configuration before binding.
+        const float savedValue = player.Cfg("ctl_port");
+        const int saved = std::isfinite(savedValue) && savedValue >= 1024 && savedValue <= 65535 && savedValue == std::floor(savedValue) ? (int)savedValue : 23333;
+        opt->ctlPort = saved >= 1024 && saved <= 65535 ? saved : 23333;
+        const char* envPort = getenv("L2DPET_PORT");
+        if (envPort && *envPort)
+        {
+            char* end = NULL;
+            const long value = strtol(envPort, &end, 10);
+            if (*end || value < 1 || value > 65535)
+            {
+                fprintf(stderr, "[ctl] invalid L2DPET_PORT\n");
+                return 2;
+            }
+            opt->ctlPort = (int)value;
+        }
+    }
     if (opt->ctlPort > 0)
     {
         ctl = new CtlServer();
@@ -461,6 +480,8 @@ int PetRuntime::Run()
         {
             char pv[16];
             snprintf(pv, sizeof(pv), "%d", opt->ctlPort);
+            player._integration.activePort = opt->ctlPort;
+            player.PanelStateJson(0); // Publish discovery before any assistant connects.
             plat::SetEnv("L2DPET_PORT", pv);   // 子进程（l2dpet-ui）继承：连这个端口
             // 内置 agent：桌宠自带 LLM 大脑（线程内调 LlmClient；命令经 g_builtinAgent
             // 队列回到主循环执行 PetCommand——与 TCP/面板同一入口）。L2D_NO_AGENT=1 关闭。
@@ -494,7 +515,7 @@ int PetRuntime::Run()
                 {
                     libScanAt = libNow;
                     std::vector<std::string> lib;
-                    ScanModelDir((plat::HomeDir() + "/.local/share/l2dpet/models").c_str(), &lib);
+                    ScanModelDir(L2DPlayer::ModelsLibDir().c_str(), &lib);
                     std::vector<std::string> merged;
                     ScanModelDir(scanDir.c_str(), &merged);
                     for (size_t i = 0; i < lib.size(); ++i)
@@ -524,7 +545,7 @@ int PetRuntime::Run()
                 if (isPetPort)
                 {
                     std::vector<std::string> lib;
-                    ScanModelDir((plat::HomeDir() + "/.local/share/l2dpet/models").c_str(), &lib);
+                    ScanModelDir(L2DPlayer::ModelsLibDir().c_str(), &lib);
                     for (size_t i = 0; i < lib.size(); ++i)
                     {
                         const std::string rp = RealPath(lib[i].c_str());
@@ -627,6 +648,19 @@ int PetRuntime::Run()
         // 解算覆盖，屏幕不受影响；物理档会给物理链留过渡状态，期间轻微晃动属正常
         player.ProbeTick();
 
+        // 气泡点选必须先于本帧解算消费：PetTick（在 Update 里）换气泡时会重写 _bubbleOptions，
+        // 排在它后面会把"刚点的选项"错算到下一条气泡头上——提问到期后还有 0.22s 淡出期可点中，
+        // 队列里正好有排队气泡时就会踩到。端口的鼠标事件在上一帧 Present 里已经收好（glfwPollEvents），
+        // 这里取到的就是该次点击。
+        if (isPetPort && port != NULL)
+        {
+            int choiceIdx = 0;
+            while (port->PollChoice(&choiceIdx))
+            {
+                player.PetChoiceMade(choiceIdx);
+            }
+        }
+
         if (frame > 0)
         {
             struct timespec ta, tb;
@@ -717,8 +751,8 @@ int PetRuntime::Run()
                 }
             }
 
-            // 桌宠：单击角色 = 点击反应 + 连击计数（click 事件防抖后发）；滚轮 = 缩放；
-            // 气泡选项 = choice 事件
+            // 桌宠：单击角色 = 点击反应 + 连击计数（click 事件防抖后发）；滚轮 = 缩放
+            //（气泡选项 = choice 事件，在帧首 Update 之前消费，见上面那段）
             int cx = 0;
             int cy = 0;
             while (port->PollClick(&cx, &cy))
@@ -732,11 +766,6 @@ int PetRuntime::Run()
                 {
                     player.NotePetClick(zoneKey);
                 }
-            }
-            int choiceIdx = 0;
-            while (isPetPort && port->PollChoice(&choiceIdx))
-            {
-                player.PetChoiceMade(choiceIdx);
             }
             int wheel = 0;
             if (port->PollWheel(&wheel))

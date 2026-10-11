@@ -24,8 +24,8 @@
 namespace
 {
 
-const size_t kOwnerMax = 700;
-const size_t kCharMax = 1600;
+const size_t kOwnerMax = 1600;
+const size_t kCharMax = 5600;
 const char* kEmptyOwner = "## 关于主人\n（还不了解）";
 const char* kEmptyChar = "## 最近发生\n（还没有）\n\n## 更早\n（空）";
 
@@ -244,13 +244,8 @@ std::string TruncAtBoundary(const std::string& s, size_t maxBytes)
     if (s.size() <= maxBytes) return s;
     size_t cut = maxBytes;
     while (cut > 0 && (unsigned char)s[cut] >= 0x80 && (unsigned char)s[cut] < 0xC0) --cut;   // 退过续字节
-    if (cut > 0 && (unsigned char)s[cut] >= 0xC0)
-    {
-        // 头字节位置：确认完整序列在界内，否则再退
-        const unsigned char c = (unsigned char)s[cut];
-        const size_t need = (c & 0xE0) == 0xC0 ? 2 : ((c & 0xF0) == 0xE0 ? 3 : 4);
-        if (cut + need > maxBytes) --cut;
-    }
+    // substr excludes s[cut]; backing up past the leading byte would split
+    // the preceding character instead.
     return s.substr(0, cut);
 }
 
@@ -709,6 +704,8 @@ std::string PetMemory::SessionTouchText(const ZoneNameFn& zoneCn) const
 bool PetMemory::Consolidate(const std::function<bool(const std::string&, std::string*, std::string*)>& llmJson,
                             const ZoneNameFn& zoneCn, bool tidy, std::string* err)
 {
+    const std::string ownerRaw = ReadText(_ownerPath), charRaw = ReadText(_charPath);
+    const std::string pendingRaw = ReadText(_pendingPath);
     std::vector<jsonlite::Value> pend = PendingAll();
     const std::string touch = SessionTouchText(zoneCn);
     if (pend.empty() && touch.empty() && !tidy) return false;
@@ -757,9 +754,38 @@ bool PetMemory::Consolidate(const std::function<bool(const std::string&, std::st
         if (err != NULL) *err = "归纳结果缺少『## 最近发生』段，丢弃这次结果";
         return false;
     }
+    if (ReadText(_ownerPath) != ownerRaw || ReadText(_charPath) != charRaw || ReadText(_pendingPath) != pendingRaw)
+    {
+        if (err != NULL) *err = "归纳期间记忆已变更，丢弃旧结果，保留待整理数据";
+        return false;
+    }
+    if (owner.size() > kOwnerMax || us.size() > kCharMax || !Contains(us, "## 更早"))
+    {
+        if (err != NULL) *err = "归纳结果超长或结构不完整，保留原记忆与待整理数据";
+        return false;
+    }
     const bool changed = owner != Owner() || us != Us();
-    WritePrivate(_ownerPath, TruncAtBoundary(owner, kOwnerMax) + "\n");
-    WritePrivate(_charPath, TruncAtBoundary(us, kCharMax) + "\n");
+    if (ReadText(_ownerPath) != ownerRaw || ReadText(_charPath) != charRaw)
+    {
+        if (err != NULL) *err = "整理期间记忆已变更，丢弃旧结果";
+        return false;
+    }
+    if (owner.size() > kOwnerMax || us.size() > kCharMax)
+    {
+        if (err != NULL) *err = "整理结果超长，保留原记忆，不进行硬截断";
+        return false;
+    }
+    if (!plat::WritePrivateFile(_ownerPath, owner + "\n"))
+    {
+        if (err != NULL) *err = "主人记忆写入失败，保留待整理数据";
+        return false;
+    }
+    if (!plat::WritePrivateFile(_charPath, us + "\n"))
+    {
+        const bool restored = plat::WritePrivateFile(_ownerPath, ownerRaw);
+        if (err != NULL) *err = restored ? "角色记忆写入失败，已恢复主人记忆" : "角色记忆写入失败，主人记忆恢复失败";
+        return false;
+    }
     for (size_t i = 0; i < pend.size(); ++i)
     {
         AppendPrivate(_episodesPath, "{\"d\":\"" + JsonEscape(pend[i].get("d").strOr("")) + "\",\"w\":"
@@ -811,6 +837,7 @@ bool PetMemory::Rewrite(const std::string& lang,
                         const std::function<bool(const std::string&, std::string*, std::string*)>& llmJson,
                         std::string* err, std::string* report)
 {
+    const std::string ownerRaw = ReadText(_ownerPath), charRaw = ReadText(_charPath);
     const std::string owner0 = Owner();
     const std::string us0 = Us();
     if (owner0.empty() && us0.empty())
@@ -853,8 +880,27 @@ bool PetMemory::Rewrite(const std::string& lang,
         if (err != NULL) *err = "改写结果结构对不上，保留原文";
         return false;
     }
-    WritePrivate(_ownerPath, TruncAtBoundary(owner, kOwnerMax) + "\n");
-    WritePrivate(_charPath, TruncAtBoundary(us, kCharMax) + "\n");
+    if (ReadText(_ownerPath) != ownerRaw || ReadText(_charPath) != charRaw)
+    {
+        if (err != NULL) *err = "整理期间记忆已变更，丢弃旧结果";
+        return false;
+    }
+    if (owner.size() > kOwnerMax || us.size() > kCharMax)
+    {
+        if (err != NULL) *err = "整理结果超长，保留原记忆，不进行硬截断";
+        return false;
+    }
+    if (!plat::WritePrivateFile(_ownerPath, owner + "\n"))
+    {
+        if (err != NULL) *err = "主人记忆写入失败，保留待整理数据";
+        return false;
+    }
+    if (!plat::WritePrivateFile(_charPath, us + "\n"))
+    {
+        const bool restored = plat::WritePrivateFile(_ownerPath, ownerRaw);
+        if (err != NULL) *err = restored ? "角色记忆写入失败，已恢复主人记忆" : "角色记忆写入失败，主人记忆恢复失败";
+        return false;
+    }
     if (report != NULL)
     {
         *report = "关于主人 " + std::to_string(BulletCount(owner0)) + " 条、" + _name + " " + std::to_string(BulletCount(us0))
@@ -866,6 +912,7 @@ bool PetMemory::Rewrite(const std::string& lang,
 bool PetMemory::Compress(const std::function<bool(const std::string&, std::string*, std::string*)>& llmJson,
                          const ZoneNameFn& zoneCn, std::string* err, std::string* report)
 {
+    const std::string ownerRaw = ReadText(_ownerPath), charRaw = ReadText(_charPath);
     const std::string owner0 = Owner();
     const std::string us0 = Us();
     if (owner0.empty() && us0.empty())
@@ -922,8 +969,27 @@ bool PetMemory::Compress(const std::function<bool(const std::string&, std::strin
     {
         us = us0;
     }
-    WritePrivate(_ownerPath, TruncAtBoundary(owner, kOwnerMax) + "\n");
-    WritePrivate(_charPath, TruncAtBoundary(us, kCharMax) + "\n");
+    if (ReadText(_ownerPath) != ownerRaw || ReadText(_charPath) != charRaw)
+    {
+        if (err != NULL) *err = "整理期间记忆已变更，丢弃旧结果";
+        return false;
+    }
+    if (owner.size() > kOwnerMax || us.size() > kCharMax)
+    {
+        if (err != NULL) *err = "整理结果超长，保留原记忆，不进行硬截断";
+        return false;
+    }
+    if (!plat::WritePrivateFile(_ownerPath, owner + "\n"))
+    {
+        if (err != NULL) *err = "主人记忆写入失败，保留待整理数据";
+        return false;
+    }
+    if (!plat::WritePrivateFile(_charPath, us + "\n"))
+    {
+        const bool restored = plat::WritePrivateFile(_ownerPath, ownerRaw);
+        if (err != NULL) *err = restored ? "角色记忆写入失败，已恢复主人记忆" : "角色记忆写入失败，主人记忆恢复失败";
+        return false;
+    }
     // 归档截断：老的已经在上面喂给 LLM 并折进"更早"，只留最近 60 条
     if (eps.size() > 60)
     {

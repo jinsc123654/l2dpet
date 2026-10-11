@@ -146,7 +146,7 @@ UI_FONT="$UI_DIR/assets/JingNanJunJunTi-JinNanJunJunTi-Bold-2.ttf"
 [ -f "$UI_FONT" ] && cp -f "$UI_FONT" "$STAGE/assets/" || true   # 系统没有 CJK 字体时兜底（面板默认用系统字体）
 
 # 调试工具（协议客户端等；都是标准库 Python）
-for t in pet_client.py pet_agent.py pet_memory.py pet_verbs.py; do
+for t in pet_client.py pet_agent.py pet_memory.py pet_verbs.py pet_bridge.py; do
     [ -f "$ROOT/live2d/tools/$t" ] && cp -f "$ROOT/live2d/tools/$t" "$STAGE/tools/$t"
 done
 

@@ -32,6 +32,7 @@ struct PetOptions
     int renderEvery = L2D_REPORT_EVERY;
     const char* portRequest = L2D_PORT_DEFAULT; // auto|x11|sdl|headless|pet
     int ctlPort = 23333;                        // --ctl <端口>：本机协议端口（默认 23333，与面板一致；0 = 不开）
+    bool ctlExplicit = false;                  // --ctl overrides environment and saved port
     int cmdFd = -1;                             // --cmd-fd <n>：指令环（表情/动作/手势/演出脚本）
     const char* modelDir = NULL;                // --model-dir（模型库目录；底部箭头切换）
     int targetFps = L2D_DEFAULT_FPS;

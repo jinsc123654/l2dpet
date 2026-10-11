@@ -92,7 +92,7 @@ endif()
 
 add_subdirectory("${EUI_NEO_DIR}" eui-neo)
 
-set(L2D_PANEL_SOURCES app.cpp petlink.cpp i18n.cpp)
+set(L2D_PANEL_SOURCES app.cpp petlink.cpp i18n.cpp ../player/src/Platform.cpp)
 
 # 程序版本（仓库根 version.txt，形如 {a-1.0.0}）：关于页要显示。文件不在就给 dev。
 set(L2D_VERSION "dev")
@@ -136,3 +136,11 @@ add_custom_command(TARGET l2dpet-ui POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
           ${CMAKE_CURRENT_SOURCE_DIR}/l2dpet.ico
           $<TARGET_FILE_DIR:l2dpet-ui>/l2dpet.ico)
+
+# External integration adapter: available next to the panel in every build.
+target_compile_definitions(l2dpet-ui PRIVATE L2D_BRIDGE_SOURCE="${CMAKE_CURRENT_SOURCE_DIR}/../tools/pet_bridge.py")
+add_custom_command(TARGET l2dpet-ui POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:l2dpet-ui>/tools
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    ${CMAKE_CURRENT_SOURCE_DIR}/../tools/pet_bridge.py
+    $<TARGET_FILE_DIR:l2dpet-ui>/tools/pet_bridge.py)

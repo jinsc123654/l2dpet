@@ -14,6 +14,7 @@
 #include "JsonLite.h"
 #include "i18n.h"
 #include "petlink.h"
+#include "core/window/window_backend.h"
 #include "Platform.h"   // plat::LocalTime（localtime_r 的跨平台包装）
 
 #include <algorithm>
@@ -49,6 +50,7 @@
 // 先包含会在 prsht.h 里炸出一堆"CALLBACK 未声明"。WIN32_LEAN_AND_MEAN 又把它们排除了，所以得显式包含。
 #include <commdlg.h>   // GetOpenFileNameW / GetSaveFileNameW
 #include <shlobj.h>    // SHBrowseForFolderW / SHGetPathFromIDListW
+#include <shellapi.h>  // ShellExecuteW（"打开配置/模型目录"）
 #endif
 
 namespace app {
@@ -237,9 +239,9 @@ using Clock = std::chrono::steady_clock;
 
 // ---------------------------------------------------------------- 状态
 // 页序：0 状态 / 1 行为 / 2 窗口 / 3 模型 / 4 对话 / 5 记忆 / 6 关于 / 7 日志（P_LOG，对话页的子页）
-//       8 外观（新增，排在最后 → 外部 agent 用 {"cmd":"panel","page":N} 打开的老页号不受影响）
-enum Page { P_STATUS, P_BEHAVIOR, P_WINDOW, P_MODEL, P_LLM, P_MEMORY, P_ABOUT, P_LOG, P_APPEARANCE };
-const int kPageMax = (int)P_APPEARANCE;
+//       8 外观 / 9 外部接入（追加页号 → 外部 agent 用 {"cmd":"panel","page":N} 打开的老页号不受影响）
+enum Page { P_STATUS, P_BEHAVIOR, P_WINDOW, P_MODEL, P_LLM, P_MEMORY, P_ABOUT, P_LOG, P_APPEARANCE, P_EXTERNAL };
+const int kPageMax = (int)P_EXTERNAL;
 
 struct Local { float v; Clock::time_point at; };
 struct LocalStr { std::string v; Clock::time_point at; };
@@ -265,7 +267,14 @@ struct AppState
     int themeMode = THEME_LIGHT;
     std::string langCode = "zh";
     std::map<int, float> pageH;           // 各页内容高度（上一帧排版结果）
-    eui::Signal<float> scroll[9];
+    eui::Signal<float> scroll[10];
+    bool externalInit = false;
+    eui::Signal<std::string> externalPort{ "23333" };
+#if defined(_WIN32)
+    eui::Signal<std::string> externalPython{ "python" };
+#else
+    eui::Signal<std::string> externalPython{ "python3" };
+#endif
     eui::Signal<std::string> key{ "" }, model{ "" }, url{ "" }, impPath{ "" }, weatherLoc{ "" }, backupPath{ "" };
     std::string hot;            // 当前悬停的演示卡片 id（Interactive Demo 风格：悬停上浮）
     int secN = 0;               // 本页小节序号（PageTitle 清零，Section 递增 → 编号徽章）
@@ -273,6 +282,8 @@ struct AppState
     std::string tryId;
     // 名字与称呼（模型页）：输入框；切到别的模型时从状态重新填
     eui::Signal<std::string> nmName{ "" }, nmNick{ "" }, nmCall{ "" };
+    eui::Signal<std::string> personaGuidance{ "" };
+    std::string personaGuidanceFor;
     std::string nmFor;          // 输入框当前对应的模型指纹
     bool importArmed = false;   // 「导入」二次确认（防手滑覆盖记忆）
     bool fieldsInit = false;
@@ -517,6 +528,43 @@ static std::string Utf8FromWide(const wchar_t* w)
     return s;
 }
 #endif
+
+/** 用系统文件管理器打开一个目录（配置目录 / 模型库）：Windows 走 W 版 API——用户名是中文时
+ *  窄字符 ShellExecuteA 打不开；macOS/Linux 交给 EUI 的 openUrl（open / xdg-open）。*/
+static void OpenFolder(const std::string& dir)
+{
+    if (dir.empty()) return;
+#if defined(_WIN32)
+    const std::wstring w = WideFromUtf8(dir);
+    if (!w.empty()) ShellExecuteW(nullptr, L"open", w.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+#else
+    eui::platform::openUrl(dir);
+#endif
+}
+
+/** 桌宠的配置目录 / 模型库目录：优先用运行中桌宠上报的路径（panel_state.dirs），
+ *  没连上时按同一套约定自己拼（见 player/src/L2DPlayer.h 的 ConfigDirPath / ModelsLibDir）。*/
+static std::string PetHomeDir()
+{
+#if defined(_WIN32)
+    const char* home = std::getenv("USERPROFILE");
+#else
+    const char* home = std::getenv("HOME");
+#endif
+    return std::string(home != nullptr && *home ? home : ".");
+}
+
+static std::string PetConfigDir()
+{
+    const std::string fromPet = S.st.get("dirs").get("config").strOr("");
+    return fromPet.empty() ? PetHomeDir() + "/.config/l2dpet" : fromPet;
+}
+
+static std::string PetModelsDir()
+{
+    const std::string fromPet = S.st.get("dirs").get("models").strOr("");
+    return fromPet.empty() ? PetHomeDir() + "/.local/share/l2dpet/models" : fromPet;
+}
 
 /** Absolute-path test: '/...' (POSIX), 'X:\' or 'X:/' (drive), '\\server\share' (UNC).
  *  Only '/'-leading used to count, so on Windows a typed drive path - and a UNC network path
@@ -1512,6 +1560,7 @@ void PageBehavior(Pen& p)
     ToggleRow(p, "t.lines", "即时台词气泡", "被戳、被摸时立刻冒一句（不等 LLM）", "lines");
     Divider(p.ui, "d1", p.x, p.y, p.w);
     ToggleRow(p, "t.native", "借用模型自带表情", "情绪强时套用模型里的开心/害羞/生气等表情", "native_expr");
+    SliderRow(p, "s.bubble.min", "气泡最短显示时间", "bubble_min_secs", 1.0f, 10.0f, 0.5f, [](float v) { return Num(v) + "s"; });
     Divider(p.ui, "d2", p.x, p.y, p.w);
     SliderRow(p, "s.react", "情绪敏感度", "reactivity", 0.3f, 2.0f, 0.1f, [](float v) { char b[16]; std::snprintf(b, 16, "%.1f×", v); return std::string(b); });
     Divider(p.ui, "d3", p.x, p.y, p.w);
@@ -1571,7 +1620,7 @@ void PageWindow(Pen& p)
 {
     PageTitle(p, "窗口", "桌宠窗口的显示方式（模型与能力见「模型」页）");
     Section(p, "sec.disp", "显示");
-    Card(p.ui, "disp.card", p.x, p.y, p.w, 3 * ToggleH() + 3 * SliderH(p.w));
+    Card(p.ui, "disp.card", p.x, p.y, p.w, 3 * ToggleH() + 4 * SliderH(p.w));
     SliderRow(p, "s.zoom", "大小（也可在角色上滚滚轮）", "zoom", 0.5f, 2.0f, 0.05f, [](float v) { return std::to_string((int)std::lround(v * 100)) + "%"; });
     Divider(p.ui, "d1", p.x, p.y, p.w);
     SliderRow(p, "s.op", "不透明度", "opacity", 0.2f, 1.0f, 0.05f, [](float v) { return std::to_string((int)std::lround(v * 100)) + "%"; });
@@ -1760,18 +1809,38 @@ void PageModel(Pen& p)
                           "解算生成——也可以用下面的按钮手动触发生成；没配 Key 时会先用本地兜底性格。")
             : ptext;
         const float th = TextH(body, inner, 13.0f, 19.0f);
-        const float perH = 16.0f + th + 12.0f + 40.0f + 16.0f;
+        const std::string fv = S.st.get("model_info").get("fv").strOr("");
+        if (S.personaGuidanceFor != fv && !ptext.empty())
+        {
+            S.personaGuidanceFor = fv;
+            S.personaGuidance.set(per.get("guidance").strOr(""));
+        }
+        const float inputY = p.y + 16.0f + th + 12.0f;
+        const float perH = 16.0f + th + 12.0f + 176.0f + 40.0f + 16.0f;
         Card(p.ui, "per.card", p.x, p.y, p.w, perH);
         Text(p.ui, "per.t", p.x + 18.0f, p.y + 16.0f, inner, th, body, 13.0f, ptext.empty() ? kMuted : kText, 400, true);
+        Text(p.ui, "per.guidance.label", p.x + 18.0f, inputY, inner, 22.0f, "你希望的性格方向（可选）", 14.0f, kText, 600);
+        components::input(p.ui, "per.guidance").theme(Th()).position(p.x + 18.0f, inputY + 30.0f).size(inner, 100.0f)
+            .placeholder(i18n::T("例如：嘴硬心软、爱吐槽但会鼓励我，少聊天气；喜欢音乐，有一点傲娇。"))
+            .bind(S.personaGuidance).multiline().fontSize(13.5f).build();
+        Text(p.ui, "per.guidance.hint", p.x + 18.0f, inputY + 138.0f, inner, 30.0f,
+             "最多 1000 字；生成时结合你的文字与模型能力。留空由模型自由生成，名字与称呼仍保留。", 12.0f, kMuted, 400, true);
         {
-            ButtonFlow bf{ p.ui, p.x + 18.0f, p.x + 18.0f, p.y + 16.0f + th + 12.0f, p.x + p.w - 18.0f };
+            ButtonFlow bf{ p.ui, p.x + 18.0f, p.x + 18.0f, inputY + 176.0f, p.x + p.w - 18.0f };
             bf.add("per.regen", ptext.empty() ? "生成性格" : "重新生成性格", [&] {
-                S.link.send("{\"cmd\":\"persona\",\"regen\":true}");
+                const std::string guidance = S.personaGuidance.get();
+                if (guidance.size() > 4000 || std::count_if(guidance.begin(), guidance.end(),
+                    [](unsigned char c) { return (c & 0xC0) != 0x80; }) > 1000)
+                {
+                    Toast("性格方向过长，请缩短到 1000 字以内");
+                    return;
+                }
+                S.link.send("{\"cmd\":\"persona\",\"regen\":true,\"guidance\":" + JStr(guidance) + "}");
                 Toast("正在按模型能力生成性格（约 3~10 秒）…");
             }, true, 36.0f);
             if (!ptext.empty())
             {
-                Text(p.ui, "per.by", p.x + 18.0f + 200.0f, p.y + 16.0f + th + 22.0f, 320.0f, 20.0f,
+                Text(p.ui, "per.by", p.x + 18.0f + 200.0f, inputY + 186.0f, std::max(100.0f, inner - 200.0f), 20.0f,
                      pby == "llm" ? "来源：LLM 按能力解算（可手改 ~/.config/l2dpet/personas/）"
                                   : "来源：本地兜底（配好 API Key 再点生成即可换成 LLM 版）",
                      12.0f, kMuted);
@@ -2507,6 +2576,158 @@ void PageAppearance(Pen& p)
     p.y += 56.0f + 20.0f;
 }
 
+
+// External integrations share the existing loopback TCP JSON-lines control service.
+int SavedExternalPort()
+{
+    return (int)S.st.get("config").get("ctl_port").numOr(23333);
+}
+
+void SaveExternalPort()
+{
+    const std::string text = S.externalPort.get();
+    if (text.empty() || text.find_first_not_of("0123456789") != std::string::npos || text.size() > 5)
+    {
+        Toast("端口必须是 1024–65535 的整数");
+        return;
+    }
+    const int port = std::atoi(text.c_str());
+    if (port < 1024 || port > 65535)
+    {
+        Toast("端口必须是 1024–65535 的整数");
+        return;
+    }
+    S.link.send("{\"cmd\":\"config\",\"set\":{\"ctl_port\":" + std::to_string(port) + "}}");
+    Toast("端口设置已发送；重启桌宠后生效");
+}
+
+std::string ExternalScript()
+{
+    const std::string exe = plat::SelfExePath();
+    const std::string folder = exe.substr(0, exe.find_last_of("/\\"));
+    const std::string packaged = folder + "/tools/pet_bridge.py";
+    if (plat::IsFile(packaged)) return packaged;
+    return L2D_BRIDGE_SOURCE;
+}
+
+void ExternalParagraph(Pen& p, const std::string& id, const std::string& raw)
+{
+    const float height = TextH(raw, p.w - 36.0f, 14.0f, 23.0f) + 12.0f;
+    Text(p.ui, id, p.x + 18.0f, p.y, p.w - 36.0f, height, raw, 14.0f, kMuted, 400, true);
+    p.y += height + 8.0f;
+}
+
+void ExternalCode(Pen& p, const std::string& id, const std::string& code, const char* copyLabel = "复制配置")
+{
+    float height = 16.0f;
+    size_t start = 0;
+    do
+    {
+        const size_t end = code.find('\n', start);
+        const std::string line = code.substr(start, end == std::string::npos ? end : end - start);
+        height += TextH(line.empty() ? " " : line, p.w - 36.0f, 13.0f, 21.0f) + 3.0f;
+        if (end == std::string::npos) break;
+        start = end + 1;
+    } while (start <= code.size());
+    Card(p.ui, id + ".bg", p.x, p.y, p.w, height);
+    Text(p.ui, id, p.x + 18.0f, p.y + 8.0f, p.w - 36.0f, height - 8.0f, code, 13.0f, kText, 400, true);
+    p.y += height + 12.0f;
+    ButtonFlow bf{ p.ui, p.x, p.x, p.y, p.x + p.w };
+    bf.add(id + ".copy", copyLabel, [code] {
+        core::window::setClipboardText(code);
+        Toast("配置已复制");
+    });
+    p.y = bf.y + 58.0f;
+}
+
+void PageExternal(Pen& p)
+{
+    PageTitle(p, "外部接入", "连接编程助手，让工作消息变成温暖的陪伴");
+    if (!S.externalInit)
+    {
+        S.externalPort.set(std::to_string(SavedExternalPort()));
+        S.externalInit = true;
+    }
+    const int current = EnvI("L2DPET_PORT", 23333);
+    const int saved = SavedExternalPort();
+
+    Section(p, "ext.companion.sec", "工作消息陪伴");
+    Card(p.ui, "ext.companion.card", p.x, p.y, p.w, 2 * ToggleH() + SliderH(p.w));
+    ToggleRow(p, "ext.companion.enable", "陪伴模式", "用俏皮的本地文案回应任务状态，不额外调用模型", "companion");
+    ToggleRow(p, "ext.companion.motion", "温和的小动作", "桌宠自行选择支持的动作；不会打断正在等待选择的气泡", "companion_motion");
+    SliderRow(p, "ext.companion.interval", "进度提醒间隔", "companion_interval", 10.0f, 120.0f, 5.0f,
+        [](float v) { return std::to_string((int)v) + "s"; });
+    p.y += 20.0f;
+    ExternalParagraph(p, "ext.companion.info", "开始、工作中、取得进展、等待确认、出错、结束和暂停，都有不同的陪伴表达。重复消息会去重，进度提醒会限频；结束只表示本轮回复已就绪。");
+    ButtonFlow companionButtons{ p.ui, p.x + 18.0f, p.x + 18.0f, p.y, p.x + p.w - 18.0f };
+    companionButtons.add("ext.companion.demo", "试试陪伴消息", [] {
+        S.link.send("{\"cmd\":\"companion_event\",\"kind\":\"completed\",\"source\":\"Codex\",\"message\":" + JStr(i18n::T("陪伴模式已准备好")) + "}");
+    });
+    p.y = companionButtons.y + 58.0f;
+
+    Section(p, "ext.port.sec", "本地接入端口");
+    ExternalParagraph(p, "ext.port.info", "默认端口：23333；地址：127.0.0.1。Hook 和 MCP 都连接此端口；这是 TCP JSON-Lines 服务，不是 HTTP 地址。");
+    ExternalParagraph(p, "ext.port.active", i18n::TF("当前端口：{} · 已保存端口：{}", {std::to_string(current), std::to_string(saved)}));
+    components::input(p.ui, "ext.port.input").theme(Th()).position(p.x + 18.0f, p.y)
+        .size(std::min(230.0f, p.w - 36.0f), 40.0f).bind(S.externalPort).fontSize(14.0f)
+        .placeholder("23333").onEnter(SaveExternalPort).build();
+    p.y += 52.0f;
+    ButtonFlow ports{ p.ui, p.x + 18.0f, p.x + 18.0f, p.y, p.x + p.w - 18.0f };
+    ports.add("ext.port.save", "保存端口", SaveExternalPort, true);
+    ports.add("ext.port.reset", "恢复默认端口", [] { S.externalPort.set("23333"); SaveExternalPort(); });
+    ports.add("ext.test", "测试气泡", [] {
+        S.link.send("{\"cmd\":\"say\",\"text\":" + JStr(i18n::T("外部接入测试成功")) + "}");
+        Toast("测试消息已发送，请查看桌宠气泡");
+    });
+    p.y = ports.y + 58.0f;
+    ExternalParagraph(p, "ext.port.restart", "保存后需退出并重新启动桌宠。启动参数可覆盖设置；接入文件会记录实际端口，助手应读取该文件。端口被占用时请选择其他端口。");
+
+    const Value& integration = S.st.get("integration");
+    const std::string directory = integration.get("directory").strOr("");
+    Section(p, "ext.discovery.sec", "接入说明文件");
+    ExternalParagraph(p, "ext.discovery.info", "把接入文件路径交给编程助手。助手读取当前端口、模型能力和性格，自行生成适合自己的 Hook / MCP 配置，并登记到注册目录。");
+    ExternalCode(p, "ext.discovery.path", integration.get("descriptor").strOr(""), "复制接入文件路径");
+    ExternalParagraph(p, "ext.discovery.readme", directory + "/README.md");
+    Section(p, "ext.clients.sec", "已注册的编程助手");
+    const auto& clients = integration.get("clients").arr;
+    if (clients.empty()) ExternalParagraph(p, "ext.clients.empty", "还没有助手注册。每个助手在 clients/<助手ID>/registration.json 登记，配置文件也可放在自己的目录里。");
+    for (const auto& client : clients)
+    {
+        const std::string clientId = client.get("id").strOr("");
+        const std::string rowId = "ext.client." + clientId;
+        Card(p.ui, rowId + ".card", p.x, p.y, p.w, 60.0f);
+        Text(p.ui, rowId + ".name", p.x + 18.0f, p.y + 8.0f, p.w - 110.0f, 22.0f, client.get("name").strOr(""), 15.0f, kText, 600);
+        Text(p.ui, rowId + ".id", p.x + 18.0f, p.y + 32.0f, p.w - 110.0f, 20.0f, clientId, 12.0f, kMuted);
+        p.ui.stack(rowId + ".wrap").position(p.x + p.w - 74.0f, p.y + 16.0f).size(56.0f, 28.0f).content([&, clientId, rowId] {
+            components::toggleSwitch(p.ui, rowId + ".toggle").theme(Th()).size(56.0f, 28.0f).checked(client.get("enabled").isBool() && client.get("enabled").b)
+                .onChange([clientId](bool enabled) {
+                    S.link.send("{\"cmd\":\"integration_client\",\"action\":\"set_enabled\",\"client_id\":" + JStr(clientId)
+                        + ",\"enabled\":" + (enabled ? "true" : "false") + "}");
+                }).build();
+        }).build();
+        p.y += 72.0f;
+    }
+    ExternalParagraph(p, "ext.clients.root", directory + "/clients");
+    ExternalParagraph(p, "ext.clients.help", "关闭某个助手后，它的 Hook 和 MCP 陪伴通知都会被桌宠拦截；更新注册文件不会重置你的通知选择。注册文件只声明身份，不会执行其中的命令。");
+
+    // 最近的工作消息：放页尾（它是"记录"，不是设置项）。上限跟着桌宠的缓冲走——PetCompanion
+    // 只留最近 60 条、只存于本次运行（不落盘），这里就全量显示，最新在最上面。
+    const auto& companionEvents = S.st.get("companion_events").arr;
+    if (!companionEvents.empty())
+    {
+        Section(p, "ext.companion.history", "最近的工作消息");
+        for (int i = (int)companionEvents.size() - 1, n = 0; i >= 0 && n < 60; --i, ++n)
+        {
+            const Value& event = companionEvents[(size_t)i];
+            const std::string id = "ext.companion.event." + std::to_string(n);
+            ExternalParagraph(p, id + ".speech", event.get("speech").strOr(""));
+            const std::string message = event.get("message").strOr("");
+            if (!message.empty()) ExternalParagraph(p, id + ".message", message);
+        }
+        ExternalParagraph(p, "ext.companion.memory", "最新在最上面，最多保留 60 条，只存于本次运行（重启即清空）；详细错误和完整成果仍以编程助手的对话为准。");
+    }
+}
+
 void PageAbout(Pen& p)
 {
     PageTitle(p, "关于");
@@ -2549,6 +2770,25 @@ void PageAbout(Pen& p)
     Text(p.ui, "about.license", p.x, yText + 76.0f, p.w, 20.0f, "开源协议 · MIT", 13.0f, kMuted, 400, false,
          core::HorizontalAlign::Center);
     p.y += cardH + 20.0f;
+
+    // 数据目录：一键用系统文件管理器打开（配置 / 模型库）。路径由运行中的桌宠上报
+    //（panel_state.dirs），没连上时按同一套约定自己拼。
+    Section(p, "about.dirs", "数据目录");
+    {
+        const std::string cfgDir = PetConfigDir();
+        const std::string modelsDir = PetModelsDir();
+        const float top = p.y + 2.0f;
+        const float cardH2 = 16.0f + 40.0f + 8.0f + 20.0f + 20.0f + 10.0f;
+        Card(p.ui, "about.dirs.card", p.x, top, p.w, cardH2);
+        ButtonFlow dirs{ p.ui, p.x + 18.0f, p.x + 18.0f, top + 14.0f, p.x + p.w - 18.0f };
+        dirs.add("about.dirs.cfg", "打开配置目录", [] { OpenFolder(PetConfigDir()); });
+        dirs.add("about.dirs.models", "打开模型目录", [] { OpenFolder(PetModelsDir()); });
+        Text(p.ui, "about.dirs.cfg.path", p.x + 18.0f, top + 60.0f, p.w - 36.0f, 20.0f,
+             i18n::TF("配置 · {}", { cfgDir }), 12.0f, kMuted);
+        Text(p.ui, "about.dirs.models.path", p.x + 18.0f, top + 80.0f, p.w - 36.0f, 20.0f,
+             i18n::TF("模型库 · {}", { modelsDir }), 12.0f, kMuted);
+        p.y = top + cardH2 + 18.0f;
+    }
 }
 
 void Refresh()
@@ -3041,6 +3281,7 @@ void compose(eui::Ui& ui, const eui::Screen& screen)
                      { "model", i18n::T("模型"), 0xF1B2, P_MODEL },
                      { "llm", i18n::T("对话"), 0xF086, P_LLM },
                      { "memory", i18n::T("记忆"), 0xF02D, P_MEMORY },
+                      { "external", i18n::T("外部接入"), 0xF1E6, P_EXTERNAL },
                      { "about", i18n::T("关于"), 0xF05A, P_ABOUT } })
             .onChange([](int v) { S.page = v; })
             .build();
@@ -3076,6 +3317,7 @@ void compose(eui::Ui& ui, const eui::Screen& screen)
                         case P_MEMORY: PageMemory(p); break;
                         case P_LOG: PageLog(p); break;
                         case P_APPEARANCE: PageAppearance(p); break;
+                        case P_EXTERNAL: PageExternal(p); break;
                         default: PageAbout(p); break;
                         }
                         S.pageH[pg] = p.y + 20.0f;   // 下一帧按这个高度给滚动区

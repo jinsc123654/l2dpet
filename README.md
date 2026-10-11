@@ -224,3 +224,7 @@ scripts/               构建与打包脚本
 感谢 Live2D、EUI-NEO，以及 GLFW、FreeType、libcurl 等开源组件的作者与贡献者。
 
 欢迎通过 [Issues](https://github.com/jinsc123654/l2dpet/issues) 反馈问题，或提交 Pull Request 一起完善这个桌面伙伴。
+
+## 外部接入
+
+设置 → 外部接入：Codex 工作消息陪伴、Hook 自动反馈、MCP 消息转发及可修改的默认本地端口 23333。接入需要 Python 3.9+，详见 [接入说明](EXTERNAL-INTEGRATION.md)。

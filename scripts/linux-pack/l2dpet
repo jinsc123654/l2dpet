@@ -53,7 +53,20 @@ DIR=$(resolve_dir "$0") || DIR=.
 BIN="$DIR/l2dtest"
 UIBIN="$DIR/l2dpet-ui"
 
-PORT=${L2DPET_PORT:-23333}
+SAVED_PORT=23333
+if command -v python3 >/dev/null 2>&1; then
+SAVED_PORT=$(python3 - <<'PYPORT'
+import json
+from pathlib import Path
+try:
+    port = json.loads((Path.home() / ".config/l2dpet/config.json").read_text()).get("ctl_port", 23333)
+    print(int(port) if isinstance(port, (int, float)) and not isinstance(port, bool) and 1024 <= port <= 65535 and int(port) == port else 23333)
+except (OSError, ValueError, TypeError, AttributeError):
+    print(23333)
+PYPORT
+)
+fi
+PORT=${L2DPET_PORT:-$SAVED_PORT}
 SIZE=${L2DPET_SIZE:-360x640}
 ORDER=${L2DPET_ORDER:-static}
 MODEL_DIR=${L2DPET_MODEL_DIR:-$HOME/.local/share/l2dpet/models}

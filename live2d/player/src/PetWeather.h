@@ -14,8 +14,8 @@ public:
     bool Load(const std::string& path);
     bool Save(const std::string& path) const;
     static bool ParseSearchResult(const std::string& response, std::string* result, std::string* err);
-private:
     bool Fresh(const std::string& location, double now) const;
+private:
     std::string _location, _result, _attemptLocation;
     double _fetchedAt = 0, _attemptAt = -1e30;
 };

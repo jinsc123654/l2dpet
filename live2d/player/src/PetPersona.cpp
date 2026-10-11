@@ -165,6 +165,7 @@ bool PetPersona::Load(const std::string& fp)
     _d.userName = Str(v, "user_name");
     _d.userNick = Str(v, "user_nick");
     _d.userCall = Str(v, "user_call");
+    _d.userGuidance = plat::Utf8Head(Str(v, "user_guidance"), 1000);
     if (const jsonlite::Value* a = Field(v, "moods"))
     {
         for (size_t i = 0; a->isArr() && i < a->arr.size(); ++i) _d.moods.push_back(a->arr[i].strOr(""));
@@ -210,6 +211,7 @@ bool PetPersona::Save(std::string* err) const
     if (!_d.userName.empty()) o += ",\"user_name\":\"" + JsonEsc(_d.userName) + "\"";
     if (!_d.userNick.empty()) o += ",\"user_nick\":\"" + JsonEsc(_d.userNick) + "\"";
     if (!_d.userCall.empty()) o += ",\"user_call\":\"" + JsonEsc(_d.userCall) + "\"";
+    o += ",\"user_guidance\":\"" + JsonEsc(_d.userGuidance) + "\"";
     o += ",\"moods\":";
     PushStrArr(_d.moods, &o);
     o += ",\"fav_expr\":";
@@ -224,7 +226,7 @@ bool PetPersona::Save(std::string* err) const
 }
 
 bool PetPersona::Generate(const std::string& fp, const std::string& modelName, const std::string& capsDigest,
-                          const std::vector<std::string>& exprFv, const LlmFn& callFn, std::string* err)
+                          const std::vector<std::string>& exprFv, const LlmFn& callFn, std::string* err, const std::string& guidance)
 {
     if (!callFn)
     {
@@ -234,6 +236,9 @@ bool PetPersona::Generate(const std::string& fp, const std::string& modelName, c
     std::string user = "模型的解算结果：\n" + capsDigest + "\n\n自带表情清单（fav_expr 只能从这里选，原样抄写）：\n";
     for (size_t i = 0; i < exprFv.size() && i < 40; ++i) user += "  " + exprFv[i] + "\n";
     if (exprFv.empty()) user += "  （这个模型没有自带表情，fav_expr 输出空数组 []）\n";
+    if (!guidance.empty())
+        user += "\n主人希望的性格方向（结合模型能力优先满足性格、语气、背景与偏好；不要照抄，不改变 JSON 格式或虚构表情）：\n"
+                + plat::Utf8Head(guidance, 1000) + "\n";
     user += "\n请输出这个角色的性格 JSON。";
     std::string out;
     if (!callFn(kGenSystem, user, &out, err)) return false;
@@ -297,6 +302,7 @@ bool PetPersona::Generate(const std::string& fp, const std::string& modelName, c
     d.likes = CutUtf8(d.likes, 160);
     d.hates = CutUtf8(d.hates, 160);
     CarryOverrides(&d);
+    d.userGuidance = plat::Utf8Head(guidance, 1000);
     _d = d;
     return true;
 }
@@ -397,6 +403,11 @@ bool PetPersona::SetNames(const std::string& name, const std::string& nick, cons
         return false;
     }
     return Save(err);
+}
+
+void PetPersona::SetGuidance(const std::string& guidance)
+{
+    _d.userGuidance = CutUtf8(guidance, 1000);
 }
 
 std::string PetPersona::DisplayName() const

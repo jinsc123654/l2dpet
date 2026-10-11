@@ -96,6 +96,25 @@ std::string L2DPlayer::PanelStateJson(int agents)
     o += ",\"touches\":" + std::to_string(_lifeTouches) + ",\"session_touches\":" + std::to_string(_sessionTouches);
     o += ",\"uptime\":" + JNum(_perfClock) + ",\"agents\":" + std::to_string(agents);
     o += LlmStateJson(agents);
+    o += ",\"integration\":{\"directory\":" + PetIntegration::Quote(PetIntegration::Root())
+        + ",\"descriptor\":" + PetIntegration::Quote(PetIntegration::Root() + "/integration.json")
+        + ",\"clients\":" + _integration.ClientsJson() + "}";
+    // 目录路径给面板"打开配置目录 / 打开模型目录"用（面板不必自己拼路径，跟着运行中的桌宠走）
+    o += ",\"dirs\":{\"config\":" + PetIntegration::Quote(ConfigDirPath())
+        + ",\"models\":" + PetIntegration::Quote(ModelsLibDir()) + "}";
+    o += ",\"companion_events\":[";
+    bool firstCompanion = true;
+    for (const auto& event : _companion.Events())
+    {
+        if (!firstCompanion) o += ",";
+        firstCompanion = false;
+        o += "{\"kind\":"; JStr(o, event.kind);
+        o += ",\"source\":"; JStr(o, event.source);
+        o += ",\"message\":"; JStr(o, event.message);
+        o += ",\"speech\":"; JStr(o, event.speech);
+        o += "}";
+    }
+    o += "]";
     o += ",\"playing\":" + std::string(_petSeqs.empty() ? "false" : "true");
     o += ",\"visible\":" + std::string(_port != NULL && _port->Hidden() ? "false" : "true");
     o += ",\"config\":" + CfgJson() + ",\"expressions\":[";
@@ -216,7 +235,33 @@ std::string L2DPlayer::PanelStateJson(int agents)
     JStr(o, _personaCall);
     o += ",\"user_name\":";
     JStr(o, _personaUserName);
+    o += ",\"guidance\":";
+    JStr(o, _personaGuidance);
     o += "}";
+    std::string descriptor = "{\"schema_version\":1,\"transport\":\"tcp-json-lines\",\"host\":\"127.0.0.1\",\"port\":"
+        + std::to_string(_integration.activePort) + ",\"saved_port\":" + std::to_string((int)Cfg("ctl_port"))
+        + ",\"clients_directory\":" + PetIntegration::Quote(PetIntegration::Root() + "/clients")
+        + ",\"bridge\":" + PetIntegration::Quote(PetIntegration::Root() + "/pet_bridge.py")
+        + ",\"instructions\":" + PetIntegration::Quote(PetIntegration::Root() + "/README.md")
+        + ",\"model\":{\"id\":" + PetIntegration::Quote(ModelFv()) + ",\"name\":" + PetIntegration::Quote(BaseName(_dir))
+        + ",\"persona\":" + PetIntegration::Quote(_personaText) + "},\"capabilities\":{\"actions\":[";
+    bool firstAction = true;
+    for (const auto& action : _actions)
+    {
+        if (!ActionReportable(action)) continue;
+        if (!firstAction) descriptor += ",";
+        firstAction = false;
+        descriptor += "{\"id\":" + PetIntegration::Quote("act:" + action.name)
+            + ",\"description\":" + PetIntegration::Quote(action.desc) + "}";
+    }
+    descriptor += "],\"expressions\":[";
+    for (size_t i = 0; i < _expressionNames.size(); ++i)
+    {
+        if (i) descriptor += ",";
+        descriptor += PetIntegration::Quote(_expressionNames[i]);
+    }
+    descriptor += "],\"events\":[\"started\",\"working\",\"progress\",\"waiting\",\"failed\",\"completed\",\"interrupted\"]}}";
+    _integration.Publish(descriptor);
     return o + "}";
 }
 

@@ -45,6 +45,9 @@
 #include "CubismRenderer_Software.hpp"
 #include "SoftTexture.hpp"
 #include "PetAgent.h"
+#include "PetCompanion.h"
+#include "PetBubbleQueue.h"
+#include "PetIntegration.h"
 #include "PetMemory.h"
 #include "PetPersona.h"
 #include "PetQuestions.h"
@@ -65,6 +68,7 @@
 #include <Motion/ACubismMotion.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -514,7 +518,8 @@ public:
         fflush(stdout);
         NoteExternalActivity();
     }
-    /** 说话时长估计：CJK 每字 ~0.22s、英文每字符 ~0.06s、空格 0.12s、ASCII 标点 0.25s */
+    /** 说话时长估计：CJK 每字 ~0.22s、英文每字符 ~0.06s、空格 0.12s、ASCII 标点 0.25s
+     *  （多字节 UTF-8 序列按"一个字"算——逐字节累加会让中文每字 0.66s，三倍高估）*/
     static csmFloat32 EstimateTalkDur(const char* text)
     {
         if (text == NULL || *text == '\0')
@@ -523,18 +528,24 @@ public:
         }
         csmFloat32 d = 0.0f;
 
-        for (const unsigned char* p = (const unsigned char*)text; *p != '\0'; ++p)
+        for (const unsigned char* p = (const unsigned char*)text; *p != '\0';)
         {
             if (*p < 0x80u)
             {
                 if (*p == ' ') { d += 0.12f; }
                 else if (*p == ',' || *p == '.' || *p == '!' || *p == '?' || *p == ';') { d += 0.25f; }
                 else { d += 0.06f; }
+                ++p;
+                continue;
             }
-            else
+            // UTF-8 首字节 → 序列长度；续字节不合法（截断/坏数据）时按 1 字节处理，绝不多跳
+            int len = (*p & 0xE0u) == 0xC0u ? 2 : ((*p & 0xF0u) == 0xE0u ? 3 : ((*p & 0xF8u) == 0xF0u ? 4 : 1));
+            for (int k = 1; k < len; ++k)
             {
-                d += 0.22f;   // UTF-8 多字节（中文/全角标点）：按"一个字"估
+                if (p[k] == '\0' || (p[k] & 0xC0u) != 0x80u) { len = k; break; }
             }
+            d += 0.22f;   // 一个字
+            p += len;
         }
         return (d < 0.8f) ? 0.8f : d;
     }
@@ -1405,6 +1416,18 @@ public:
     /** 每帧推进（Update 开头调用）*/
     void PetTick()
     {
+        PetBubbleQueue::Bubble bubble;
+        if (_port && _bubbleQueue.Take(_perfClock, Cfg("bubble_min_secs"), _port->BubbleAwaitingChoice(), &bubble))
+            PresentBubble(bubble);
+        // 提问气泡过期/被收起后清掉陈旧选项与猜拳状态：否则它们一直挂着，companion 会按
+        //"主人在选"把外部消息静默挡掉（_bubbleOptions 只在点选/换气泡/reset 时清过）。
+        // 必须晚于帧首的点选消费——点下去的瞬间端口就不再 awaiting，这一帧点选已被取走才安全。
+        if (_port != NULL && !_bubbleOptions.empty() && !_port->BubbleAwaitingChoice())
+        {
+            _bubbleOptions.clear();
+            _bubbleOptionDo.clear();
+            _gameRps = 0;
+        }
         if (_petSeqs.empty())
         {
             return;
@@ -2046,6 +2069,37 @@ public:
     // ================================================================ 配置（偏好窗口 / {"cmd":"config"}）
     // 扁平键值，存 ~/.config/l2dpet/config.json；窗口类键（opacity/top/passthrough）由 pet port 自己应用，
     // 这里只负责存取和随状态下发。llm.* 给 agent 读（config 事件 / status）。
+    PetCompanion _companion;
+    PetBubbleQueue _bubbleQueue;
+    void PresentBubble(const PetBubbleQueue::Bubble& b)
+    {
+        if (!_port) return;
+        std::vector<const char*> arr;
+        for (const auto& option : b.shown) arr.push_back(option.c_str());
+        _port->ShowBubble(b.text.c_str(), arr.empty() ? NULL : &arr[0], (int)arr.size(),
+            (float)PetBubbleQueue::Hold(b, Cfg("bubble_min_secs")));
+        _bubbleOptions = b.options;
+        _bubbleOptionDo = b.actions;
+        // 口型跟着"上屏"走（排队的气泡不能提前动嘴）；speak_dur 之类的显式时长在这里生效
+        if (b.talk) StartTalk(b.talkDur > 0.05f ? b.talkDur : EstimateTalkDur(b.text.c_str()), b.text.c_str());
+    }
+    void ShowPetBubble(const std::string& text, const std::vector<std::string>& shown,
+                       const std::vector<std::string>& options, const std::vector<jsonlite::Value>& actions,
+                       float duration, bool talk = true, float talkDur = 0.0f)
+    {
+        if (!_port || text.empty()) return;
+        if (_port->BubbleAwaitingChoice()) return;
+        PetBubbleQueue::Bubble b;
+        b.text = text; b.shown = shown; b.options = options; b.actions = actions;
+        b.duration = duration; b.talk = talk; b.talkDur = talkDur;
+        if (_bubbleQueue.Offer(b, _perfClock, Cfg("bubble_min_secs"))) PresentBubble(b);
+    }
+    void ClearBubbleDisplay()
+    {
+        _bubbleQueue.Clear();
+        if (_port) _port->HideBubble();
+    }
+    PetIntegration _integration;
     struct CfgDef { const char* key; csmFloat32 def, lo, hi; const char* label; };
     static const CfgDef* CfgDefs(size_t* n)
     {
@@ -2065,7 +2119,12 @@ public:
             { "work_remind", 60, 0, 240, "连续工作提醒（分钟，0=关）" },
             { "weather", 0, 0, 1, "天气闲聊" },
             // 气泡文字大小（像素）：Windows 上默认字号常显得偏小/发虚，给一个可调项
+            { "bubble_min_secs", 3, 1, 10, "气泡最短显示时间" },
             { "bubble_px", 14, 10, 40, "气泡字号（像素）" },
+            { "ctl_port", 23333, 1024, 65535, "本地接入端口（重启生效）" },
+            { "companion", 1, 0, 1, "外部消息陪伴" },
+            { "companion_motion", 1, 0, 1, "陪伴小动作" },
+            { "companion_interval", 30, 10, 120, "进度提醒间隔（秒）" },
         };
         *n = sizeof(k) / sizeof(k[0]);
         return k;
@@ -2078,6 +2137,24 @@ public:
     std::string CfgPath() const
     {
         return plat::HomeDir() + "/.config/l2dpet/config.json";
+    }
+    /** 配置目录（config.json / memory / questions … 所在；面板"打开配置目录"用）*/
+    static std::string ConfigDirPath()
+    {
+        return PathNative(plat::HomeDir() + "/.config/l2dpet");
+    }
+    /** 用户模型库目录（托盘/右键菜单里可选的模型；MainLoop 扫描与面板"打开模型目录"同一套约定）*/
+    static std::string ModelsLibDir()
+    {
+        return PathNative(plat::HomeDir() + "/.local/share/l2dpet/models");
+    }
+    /** Windows 上把分隔符统一成 '\'：这两个目录会显示在面板上，混着 '/' 难看（两种都能用）*/
+    static std::string PathNative(std::string p)
+    {
+#if defined(_WIN32)
+        for (size_t i = 0; i < p.size(); ++i) { if (p[i] == '/') p[i] = '\\'; }
+#endif
+        return p;
     }
     void CfgLoad();
     void CfgSave()
@@ -2104,7 +2181,7 @@ public:
         {
             if (o.size() > 1) o += ",";
             JStr(o, it->first);
-            o += ":" + JNum(it->second);
+            o += ":" + (it->first == "ctl_port" ? std::to_string((int)it->second) : JNum(it->second));
         }
         if (!_cfgStr.empty() || alwaysStr || _cfgLoaded)
         {
@@ -2144,6 +2221,7 @@ public:
     /** 设一项（钳到范围）；返回 false = 未知键 */
     bool CfgSet(const std::string& key, csmFloat32 v)
     {
+        if (key == "ctl_port" && (!std::isfinite(v) || v < 1024 || v > 65535 || v != std::floor(v))) return false;
         size_t n = 0;
         const CfgDef* d = CfgDefs(&n);
 
@@ -2545,11 +2623,8 @@ public:
         // 这里收的是**最终文案**：内置台词在 LifeLine / PickReactLine / peti18n::TF 里翻好，
         // LLM 与台词库下发的句子本来就是当前语言 → 不再二次翻译（二次翻译会把成品当"未命中"记进清单）
         _lastReactLineAt = _perfClock;
-        if (talk)
-        {
-            StartTalk(EstimateTalkDur(line.c_str()), line.c_str());
-        }
-        _port->ShowBubble(line.c_str(), NULL, 0, hold);
+        // 口型不在这里起：气泡可能排队，PresentBubble 到上屏那一刻才开口（talk=false 的梦话不出声）
+        ShowPetBubble(line, {}, {}, {}, hold, talk);
         if (talk && _lifeState != LS_ASLEEP) FeedPush("say", line);   // 梦话/Zzz 不进动态
         printf("[life] %s「%s」\n", LifeStateKey(_lifeState), line.c_str());
         fflush(stdout);
@@ -3365,7 +3440,7 @@ private:
     std::deque<std::string> _llmLog;          // agent 上报的交互记录（JSON 对象原文，最新在后）
     std::string _memoryText;                  // agent 归纳的跨会话记忆（markdown；面板"记忆本"页显示）
     std::string _personaText;                 // 当前模型的性格（agent 生成上报；面板"模型"页显示）
-    std::string _personaName, _personaBy;
+    std::string _personaName, _personaBy, _personaGuidance;
     std::string _personaNick, _personaCall, _personaUserName;   // 主人手设的小名 / 怎么叫主人 / 名字（空 = 没设）
     std::string _memoryCompressedHint;        // 压缩刚完成时的即时提示（面板显示；真时间从 habits.json 读）
     /** 上次记忆压缩时间（读当前模型 habits.json 的 compressT；10 秒缓存，别在状态推送上反复读盘） */

@@ -12,6 +12,7 @@
 #include "JsonLite.h"
 #include "CtlServer.hpp"
 #include "PetI18n.h"
+#include "PetWatermark.h"
 #include "l2d_config.h"
 
 #include <CubismFramework.hpp>
@@ -27,6 +28,7 @@
 #include <Motion/ACubismMotion.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -1688,7 +1690,8 @@ void L2DPlayer::UpdateFollowTarget(csmFloat32 dt)
  * 水印控制：找到模型自带的"水印"表情（作者提供的开关——VTS 里按空格触发的就是它），
  * 记下它改哪些参数、怎么改（Blend）。只有带这个表情的模型才动参数，避免和别的模型
  * 里恰好同名的参数误撞（实测库里有模型也有 id 叫 "Param" 的参数，但不是水印）。
- * 判据：表情名含"水印"或文件名为 shuiyin*.exp3.json。
+ * 判据见 PetWatermark.h（表情名或文件名含水印关键词；子目录里的 exp3 由
+ * FileUtil.cpp 的 VTS 补全负责登记，否则 EXP/ 发货格式的模型根本看不到表情）。
  */
 void L2DPlayer::SetupWatermarkControl()
 {
@@ -1701,8 +1704,7 @@ void L2DPlayer::SetupWatermarkControl()
     {
         const csmString name = _setting->GetExpressionName(i);
         const csmString file = _setting->GetExpressionFileName(i);
-        if (strstr(name.GetRawString(), "水印") == NULL &&
-            strstr(file.GetRawString(), "shuiyin") == NULL)
+        if (!petwatermark::NameMatch(name.GetRawString()) && !petwatermark::NameMatch(file.GetRawString()))
         {
             continue;
         }

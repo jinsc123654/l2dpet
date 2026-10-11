@@ -72,7 +72,8 @@ private:
     void Announce();
     void OpenMemory();
     void PushMemory();
-    void OpenPersona(bool regen);                  // 读/生成这个模型的性格（regen=强制重新生成）
+    void ClearRoleContext(const std::string& why);
+    void OpenPersona(bool regen, const std::string* guidance = NULL);                  // 读/生成这个模型的性格（regen=强制重新生成）
     std::string CapsDigest() const;                // 能力摘要（喂给性格生成的提示词）
     void PushPersona();                            // 报给面板（模型页显示）
     void OpenQuestions(bool regen);                // 读/生成"问题库"（regen=强制重新生成一批）
@@ -123,6 +124,7 @@ private:
     double _cfgIdlePeriod = 60.0;
     bool _cfgLlmIdle = true;
     bool _cfgLlmQuestions = true;
+    double _lastWeatherIdleAt = 0.0;  // 主动天气闲聊最多每小时一次
     bool _cfgWeather = false;         // 天气闲聊（配置里打开才在闲时提天气）
     PetWeather _weather;
     std::string _cfgWeatherLoc;       // 主人所在位置（可空）
@@ -155,6 +157,7 @@ private:
     // 睡眠省 token：睡着即暂停 LLM；**只有主人点她**（或被戳醒）才恢复——自己睡饱醒来只用本地台词库
     bool _llmPaused = false;
     bool _choiceDid = false;   // 刚点的选项自带了动作（已在桌宠上演）：续戏用 queue 不打断它
+    std::string _deferPersonaGuidance;
     bool _deferPersona = false, _deferCompress = false;   // 暂停期间面板要求的 LLM 活：恢复后再做
     void SetLlmPaused(bool paused, const std::string& why);   // 上次补货尝试（防抖：至少间隔 120s）
 };

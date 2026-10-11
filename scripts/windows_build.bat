@@ -211,6 +211,11 @@ rem developer logo shown on the About page (the panel finds it next to the exe)
 copy /Y "%ROOT%\live2d\panel\l2dpet-logo.png" "%OUT%\l2dpet-logo.png" >nul || goto fail
 xcopy "%WORK%\build-panel-win\Release\assets" "%OUT%\assets" /E /I /Y /Q >nul || goto fail
 
+rem external Hook / MCP adapter (Python 3.9+ required only for integrations)
+if not exist "%OUT%\tools" mkdir "%OUT%\tools"
+copy /Y "%ROOT%\live2d\tools\pet_bridge.py" "%OUT%\tools\pet_bridge.py" >nul || goto fail
+copy /Y "%ROOT%\EXTERNAL-INTEGRATION.md" "%OUT%\tools\EXTERNAL-INTEGRATION.md" >nul || goto fail
+
 rem bundled sample model (Live2D Hiyori, Free Material License) so an empty model library still starts
 if exist "%ROOT%\live2d\bundled-models" (
   xcopy "%ROOT%\live2d\bundled-models" "%OUT%\models" /E /I /Y /Q >nul || goto fail

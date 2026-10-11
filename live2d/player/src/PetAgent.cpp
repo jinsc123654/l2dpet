@@ -780,6 +780,8 @@ void PetAgent::Run()
             {
                 if (_mem != NULL) _mem->SaveSessionTouchNow();
                 if (!LoadCaps()) continue;
+                ClearRoleContext("换模型");
+                interrupt.clear();
                 OpenMemory();
                 OpenPersona(false);   // 换了模型 = 换了角色：读/生成它的性格
                 OpenQuestions(false); // 也换它的问题库（每个模型关心的事不一样）
@@ -818,12 +820,16 @@ void PetAgent::Run()
             if (ev == "persona_regen" && _llmPaused)
             {
                 _deferPersona = true;
+                _deferPersonaGuidance = GetStr(&e, "guidance");
                 Log("她在睡觉：重新生成性格等她被点醒后再做");
                 continue;
             }
             if (ev == "persona_regen")   // 面板"重新生成性格"按钮
             {
-                OpenPersona(true);
+                const std::string guidance = GetStr(&e, "guidance");
+                OpenPersona(true, &guidance);
+                ResetConversation("性格更新");
+                interrupt.clear();
                 _linesOk = false;        // 台词库也要按新性格重写
                 PushLines("性格更新");
                 continue;
@@ -889,7 +895,9 @@ void PetAgent::Run()
             }
             if (ev == "profile_reload")  // 导入备份后：把盘上的记忆/性格/题库/笑话重新读进内存
             {
-                if (_mem != NULL) _mem->SaveSessionTouchNow();
+                // 恢复已经写入磁盘；不要让旧 habits 内存副本反向盖掉备份。
+                ClearRoleContext("导入备份");
+                interrupt.clear();
                 if (!LoadCaps()) continue;
                 OpenMemory();
                 OpenPersona(false);
@@ -966,7 +974,10 @@ void PetAgent::Run()
             if (_deferPersona)
             {
                 _deferPersona = false;
-                OpenPersona(true);
+                OpenPersona(true, &_deferPersonaGuidance);
+                _deferPersonaGuidance.clear();
+                ResetConversation("性格更新");
+                interrupt.clear();
                 _linesOk = false;
                 PushLines("性格更新");
             }
@@ -1037,16 +1048,13 @@ void PetAgent::Run()
             ambient.push_back("用户的鼠标刚在你的" + _lastHover + "附近");
             _lastHover.clear();
         }
-        // 天气闲聊（设置里打开才提）：复用模型联网查询的 5 小时缓存
-        if (_cfgWeather && _cfgLlmIdle)
+        // 只在真正闲时偶尔提天气；触摸、选项、陪伴等交互不插入天气话题。
+        if (_cfgWeather && _cfgLlmIdle && StartsWith(interrupt.c_str(), "【闲时】")
+            && _weather.Fresh(_cfgWeatherLoc, (double)time(NULL))
+            && (_lastWeatherIdleAt == 0.0 || nowB - _lastWeatherIdleAt >= 3600.0))
         {
-            static int weatherTick = 0;
-            if (++weatherTick % 3 == 0)   // 每隔几段提一次，别刷屏
-            {
-                ambient.push_back(std::string("想聊天气可以自然提一句")
-                                  + (_cfgWeatherLoc.empty() ? "" : ("（主人在：" + _cfgWeatherLoc + "）"))
-                                  + "——使用提供的联网天气查询缓存，结合真实天气关心主人；暂无有效结果时不要编造天气。");
-            }
+            _lastWeatherIdleAt = nowB;
+            ambient.push_back("【天气闲聊】可以结合查询结果偶尔关心主人一句，不要反复播报天气，也不要每次都提醒穿衣或带伞。");
         }
         ++_segN;
         std::string note = "第 " + std::to_string(_segN) + " 段。" + MoodText() + interrupt;
@@ -1545,12 +1553,14 @@ std::string PetAgent::CapsDigest() const
     return o;
 }
 
-void PetAgent::OpenPersona(bool regen)
+void PetAgent::OpenPersona(bool regen, const std::string* guidance)
 {
     const std::string fp = _caps.modelFv;
     const l2d::LlmSettings cfg = l2d::LlmLoadSettings();
     _persona.Reset();
-    if (!regen && _persona.Load(fp))
+    const bool loaded = _persona.Load(fp);
+    const std::string userGuidance = guidance != NULL ? *guidance : _persona.Get().userGuidance;
+    if (!regen && loaded)
     {
         // 兜底版（当时没 Key）现在有 Key 了 → 再试一次 LLM 升级；LLM 版直接用缓存
         if (_persona.Get().by != "heuristic" || cfg.key.empty())
@@ -1587,7 +1597,7 @@ void PetAgent::OpenPersona(bool regen)
         };
         for (int attempt = 0; attempt < 2 && !ok; ++attempt)   // LLM 偶尔吐坏 JSON：重试一次
         {
-            ok = _persona.Generate(fp, _caps.modelName, CapsDigest(), _caps.exprFv, call, &err);
+            ok = _persona.Generate(fp, _caps.modelName, CapsDigest(), _caps.exprFv, call, &err, userGuidance);
             if (!ok && attempt == 0) Log("性格生成失败（" + err + "），重试一次…");
         }
     }
@@ -1601,6 +1611,7 @@ void PetAgent::OpenPersona(bool regen)
         _persona.Heuristic(fp, _caps.modelName, _caps.exprFv);
     }
     std::string werr;
+    _persona.SetGuidance(userGuidance);
     if (!_persona.Save(&werr)) Log("性格落盘失败：" + werr);
     Log("性格：" + _persona.Get().name + "——" + plat::Utf8Head(_persona.Get().persona, 60)
         + "（" + _persona.Get().by + "）");
@@ -1617,6 +1628,7 @@ void PetAgent::PushPersona()
         + "\",\"name\":\"" + JsonEscape(_persona.DisplayName())
         + "\",\"nick\":\"" + JsonEscape(_persona.Get().userNick)
         + "\",\"call\":\"" + JsonEscape(_persona.Get().userCall)
+        + "\",\"guidance\":\"" + JsonEscape(_persona.Get().userGuidance)
         + "\",\"user_name\":\"" + JsonEscape(_persona.Get().userName)
         + "\",\"by\":\"" + JsonEscape(_persona.Get().by) + "\"}");
 }
@@ -2145,6 +2157,18 @@ void PetAgent::LangRewriteAll(const std::string& lang)
     ResetConversation("语言切换完成");   // 重写期间若有段落，也是混着旧记忆写的：再清一次，用新语言从头聊
 }
 
+void PetAgent::ClearRoleContext(const std::string& why)
+{
+    _deferPersona = false;
+    _deferPersonaGuidance.clear();
+    _deferCompress = false;
+    _backlog[0].clear();
+    _backlog[1].clear();
+    _lastHover.clear();
+    _lastWeatherIdleAt = 0.0;
+    ResetConversation(why);
+}
+
 /** 新开一轮对话：丢掉多轮上下文和与之相关的状态（上段警告、待答的问题），下一段只看系统提示 + 记忆 */
 void PetAgent::ResetConversation(const std::string& why)
 {
@@ -2154,6 +2178,7 @@ void PetAgent::ResetConversation(const std::string& why)
     _lastQOpts.clear();
     _awaitingUntil = 0.0;
     _historyLang = LangResolve(_cfgLang);
+    Rpc("{\"cmd\":\"reset\",\"model\":\"" + JsonEscape(_caps.modelFv) + "\"}");
     Log("新开一轮 LLM 对话（" + why + "）");
 }
 
@@ -2189,7 +2214,8 @@ bool PetAgent::LlmSequence(const std::string& note, const std::string& memory, j
         sys.role = "system";
         sys.content = LangFixup(std::string(kSystemPromptHead) + _persona.PromptBlock() + _caps.raw + kSystemPromptTail,
                                 LangResolve(_cfgLang))
-                      + SpeechLangHint();
+                      + SpeechLangHint()
+                      + "\n天气只是偶尔的闲聊素材。除非主人主动询问或本段标有【天气闲聊】，不要主动聊天气、温度、降雨、穿衣或带伞；换一个贴近当前互动的话题。";
         const size_t m = sys.content.find("{model}");
         if (m != std::string::npos) sys.content.replace(m, 7, _caps.modelFv);
         msgs.push_back(sys);
@@ -2206,6 +2232,7 @@ bool PetAgent::LlmSequence(const std::string& note, const std::string& memory, j
                         "· 你觉得重要但记忆里没有的，用提问慢慢弄清（问题见闲时段的候选题）。\n";
         msgs.push_back(mem);
     }
+    if (note.find("【天气】") != std::string::npos || note.find("【天气闲聊】") != std::string::npos)
     {
         l2d::LlmMsg weather;
         weather.role = "system";

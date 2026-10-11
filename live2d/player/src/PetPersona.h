@@ -44,6 +44,7 @@ public:
         std::string userName;     // 名字（空 = 用生成的 name）
         std::string userNick;     // 小名
         std::string userCall;     // 她怎么称呼主人（空 = 按性格/记忆）
+        std::string userGuidance; // 主人提供的性格方向，每模型保存
         std::string at;           // 生成时间（%m-%d %H:%M）
     };
 
@@ -58,10 +59,13 @@ public:
      * exprFv = 可用的表情 fv 列表（生成的 fav_expr 会被校验，非法的丢弃）。
      */
     bool Generate(const std::string& fp, const std::string& modelName, const std::string& capsDigest,
-                  const std::vector<std::string>& exprFv, const LlmFn& callFn, std::string* err);
+                  const std::vector<std::string>& exprFv, const LlmFn& callFn, std::string* err,
+                  const std::string& guidance = std::string());
 
     /** 本地启发式兜底（没有 API Key / 生成失败）：由自带表情道具 + 指纹决定，各模型仍然不同 */
     void Heuristic(const std::string& fp, const std::string& modelName, const std::vector<std::string>& exprFv);
+
+    void SetGuidance(const std::string& guidance);
 
     bool Empty() const { return _d.persona.empty(); }
     const Data& Get() const { return _d; }

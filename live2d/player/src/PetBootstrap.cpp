@@ -74,7 +74,15 @@ int ParseArgs(int argc, char** argv, PetOptions* o)
             }
             if (OptValue(argv[i], &i, argc, argv, "--ctl", &opt))
             {
-                o->ctlPort = atoi(opt);
+                char* end = NULL;
+                const long value = strtol(opt, &end, 10);
+                if (!*opt || *end || value < 0 || value > 65535)
+                {
+                    fprintf(stderr, "[ctl] invalid port: %s\n", opt);
+                    return 2;
+                }
+                o->ctlPort = (int)value;
+                o->ctlExplicit = true;
                 continue;
             }
             if (strcmp(argv[i], "--no-ui") == 0)

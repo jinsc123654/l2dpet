@@ -1307,7 +1307,7 @@ void L2DPlayer::PetChoiceMade(int index)
     {
         if (_port != NULL)
         {
-            _port->HideBubble();
+            ClearBubbleDisplay();
         }
         _bubbleOptions.clear();
         _bubbleOptionDo.clear();
@@ -1397,7 +1397,7 @@ void L2DPlayer::PetChoiceMade(int index)
     _petEvents.push_back(json);
     if (_port != NULL)
     {
-        _port->HideBubble();
+        ClearBubbleDisplay();
     }
     if (hasDo)
     {
@@ -1997,12 +1997,13 @@ int L2DPlayer::ExecPetStep(const jsonlite::Value& v, std::vector<std::string>* w
         {
             const csmFloat32 td = d > 0.05f ? d : EstimateTalkDur(text.c_str());
 
-            StartTalk(td, text.c_str());
             // 正挂着一个没选的提问：普通台词只动嘴、不换气泡（否则用户还没来得及点，选项就被冲掉了）
             const bool keepQuestion = _port != NULL && opts.empty() && _port->BubbleAwaitingChoice();
 
             if (keepQuestion)
             {
+                StartTalk(td, text.c_str());   // 只有"只动嘴"这一支要立刻开口；会换气泡的那支由
+                                               // PresentBubble 到点上屏再开口（排队时不能提前动嘴）
                 printf("[pet] 气泡里有待选的提问，这句只说不换气泡：%s\n", text.c_str());
                 fflush(stdout);
             }
@@ -2017,9 +2018,7 @@ int L2DPlayer::ExecPetStep(const jsonlite::Value& v, std::vector<std::string>* w
                 {
                     arr.push_back(opts[oi].c_str());
                 }
-                _port->ShowBubble(text.c_str(), arr.empty() ? NULL : &arr[0], (int)arr.size(), bd);
-                _bubbleOptions = opts;
-                _bubbleOptionDo = optDo;
+                ShowPetBubble(text, opts, opts, optDo, bd, true, td);
                 FeedPush("llm", opts.empty() ? text : peti18n::TF("{}（等你回答）", { text }));
             }
         }
@@ -2048,12 +2047,70 @@ std::string L2DPlayer::PetCommand(const std::string& line, csmFloat32 fps, bool*
         if (s.isStr()) JStr(seq, s.str);
         else seq = JNum(s.numOr(0.0));
     }
+    std::string head = "{\"seq\":" + seq + ",";
     std::string cmd = v.get("cmd").strOr("");
+    if ((cmd == "say" || cmd == "speak" || cmd == "sequence" || cmd == "action" || cmd == "expression") && !v.get("client_id").isNull())
+    {
+        const std::string id = v.get("client_id").strOr("");
+        if (!_integration.Registered(id)) return head + "\"ok\":false,\"msg\":\"register client_id first\"}";
+        if (!_integration.Enabled(id)) return head + "\"ok\":true,\"shown\":false,\"reason\":\"client_disabled\"}";
+    }
     if (cmd == "say")
     {
         cmd = "speak";   // 别名：say ≡ speak（口型 + 气泡；text/options 字段同构）
     }
-    std::string head = "{\"seq\":" + seq + ",";
+
+
+
+    if (cmd == "integration_client")
+    {
+        const std::string id = v.get("client_id").strOr("");
+        const std::string action = v.get("action").strOr("");
+        bool ok = false;
+        if (action == "register") ok = _integration.Register(id, v.get("name").strOr(id.c_str()));
+        else if (action == "set_enabled" && v.get("enabled").isBool())
+            ok = _integration.SetEnabled(id, v.get("enabled").b);
+        return head + "\"ok\":" + (ok ? "true" : "false") + ",\"type\":\"integration_client\",\"msg\":" + JStrRet(ok ? "" : "invalid or unregistered client") + "}";
+    }
+
+    if (cmd == "companion_event")
+    {
+        if (!_cfgLoaded) CfgLoad();
+        const std::string kind = v.get("kind").strOr("");
+        if (!PetCompanion::ValidKind(kind))
+            return head + "\"ok\":false,\"code\":\"bad_args\",\"msg\":\"invalid companion event kind\"}";
+        const std::string sourceHint = plat::Utf8Head(v.get("source").strOr("Codex"), 40);
+        const bool explicitClient = !v.get("client_id").isNull();
+        const std::string clientId = explicitClient ? v.get("client_id").strOr("") : PetIntegration::LegacyId(sourceHint);
+        if (!PetIntegration::ValidId(clientId))
+            return head + "\"ok\":false,\"msg\":\"invalid client_id\"}";
+        if (!explicitClient && !_integration.Registered(clientId)) _integration.Register(clientId, sourceHint);
+        if (!_integration.Registered(clientId))
+            return head + "\"ok\":false,\"msg\":\"register client_id first\"}";
+        if (!_integration.Enabled(clientId))
+            return head + "\"ok\":true,\"shown\":false,\"reason\":\"client_disabled\"}";
+        const std::string source = _integration.Name(clientId);
+        const std::string message = plat::Utf8Head(v.get("message").strOr(""), 600);
+        const std::string identity = plat::Utf8Head(v.get("event_id").strOr(""), 200);
+        const auto feedback = _companion.Receive(kind, source, message, identity.empty() ? identity : clientId + ":" + identity, _perfClock,
+            Cfg("companion_interval"), Cfg("companion") > 0.5f, (!_bubbleOptions.empty() || _bubbleQueue.HasQuestion()), peti18n::Code());
+        if (feedback.shown)
+        {
+            std::string speech = feedback.speech;
+            // A short original excerpt keeps the actual status visible; full text is in the settings log.
+            if (!message.empty()) speech += "\n" + plat::Utf8Head(message, 60);
+            std::string step = "{\"speak\":" + JStrRet(speech);
+            if (Cfg("companion_motion") > 0.5f && _petSeqs.empty()
+                && ResolveActionFv("act:" + feedback.action) != NULL)
+                step += ",\"action\":" + JStrRet("act:" + feedback.action) + ",\"scale\":0.45";
+            step += "}";
+            jsonlite::Value sv;
+            if (jsonlite::parse(step.c_str(), step.size(), sv, NULL)) ExecPetStep(sv, NULL, -1, false);
+            NoteExternalActivity();
+        }
+        return head + "\"ok\":true,\"type\":\"companion_event\",\"shown\":"
+            + (feedback.shown ? "true" : "false") + ",\"reason\":" + JStrRet(feedback.reason) + "}";
+    }
 
     if (cmd == "query")
     {
@@ -2330,10 +2387,8 @@ std::string L2DPlayer::PetCommand(const std::string& line, csmFloat32 fps, bool*
         {
             arr.push_back(shown[i].c_str());
         }
-        StartTalk(EstimateTalkDur(ask.c_str()), ask.c_str());
-        _port->ShowBubble(ask.c_str(), &arr[0], (int)arr.size(), 20.0f);
-        _bubbleOptions = opts;
-        _bubbleOptionDo.clear();
+        ClearBubbleDisplay(); // Explicit user interaction replaces the previous conversation.
+        ShowPetBubble(ask, shown, opts, {}, 20.0f);   // 口型由 PresentBubble 上屏时起（见 ShowPetBubble 注释）
         _gameRps = 1;
         MuteTouchResponse();   // 出拳期间点她/搓她别来抢这个气泡
         printf("[game] 猜拳开始：%s\n", ask.c_str());
@@ -2626,7 +2681,13 @@ std::string L2DPlayer::PetCommand(const std::string& line, csmFloat32 fps, bool*
         {
             if (g_builtinAgent != NULL && g_builtinAgent->Running())
             {
-                g_builtinAgent->PushEvent("{\"event\":\"persona_regen\"}");
+                if (!v.get("guidance").isNull() && !v.get("guidance").isStr())
+                    return head + "\"ok\":false,\"code\":\"bad_guidance\",\"msg\":\"性格方向必须是文字\"}";
+                const std::string guidance = v.get("guidance").strOr(_personaGuidance.c_str());
+                if (guidance.size() > 4000 || std::count_if(guidance.begin(), guidance.end(),
+                    [](unsigned char c) { return (c & 0xC0) != 0x80; }) > 1000)
+                    return head + "\"ok\":false,\"code\":\"bad_guidance\",\"msg\":\"性格方向过长，请缩短到 1000 字以内\"}";
+                g_builtinAgent->PushEvent("{\"event\":\"persona_regen\",\"guidance\":" + JStrRet(guidance) + "}");
                 return head + "\"ok\":true,\"type\":\"persona\",\"msg\":\"已让内置 agent 重新生成性格（约 3~10 秒）\"}";
             }
             _petEvents.push_back("{\"event\":\"persona\",\"ok\":false,\"msg\":\"内置 agent 没在跑（外部 agent 形态请自行生成）\"}");
@@ -2643,6 +2704,8 @@ std::string L2DPlayer::PetCommand(const std::string& line, csmFloat32 fps, bool*
             _personaNick = v.get("nick").strOr("");
             _personaCall = v.get("call").strOr("");
             _personaUserName = v.get("user_name").strOr("");
+            _personaGuidance = v.get("guidance").strOr("");
+            PanelStateJson(0);
             _petEvents.push_back("{\"event\":\"persona\",\"ok\":true,\"name\":" + JStrRet(_personaName)
                                  + ",\"by\":" + JStrRet(_personaBy) + "}");
         }
@@ -2850,7 +2913,9 @@ std::string L2DPlayer::PetCommand(const std::string& line, csmFloat32 fps, bool*
         JStr(o, ModelFv());
         o += ",\"playing\":";
         o += _petSeqs.empty() ? std::string("null") : _petSeqs.front().seq;
-        o += ",\"queue\":" + std::to_string(_petSeqs.size()) + ",\"fps\":" + JNum(fps);
+        o += ",\"queue\":" + std::to_string(_petSeqs.size())
+             + ",\"bubbles\":" + std::to_string(_bubbleQueue.PendingCount())
+             + ",\"talking\":" + std::string(IsTalking() ? "true" : "false") + ",\"fps\":" + JNum(fps);
         if (_isPet)
         {
             o += ",\"mood\":" + LifeMoodJson() + ",\"config\":" + CfgJson();
@@ -2884,7 +2949,7 @@ std::string L2DPlayer::PetCommand(const std::string& line, csmFloat32 fps, bool*
         ReleasePose();
         if (_port != NULL)
         {
-            _port->HideBubble();
+            ClearBubbleDisplay();
         }
         _bubbleOptions.clear();
         _bubbleOptionDo.clear();
@@ -3118,8 +3183,7 @@ void L2DPlayer::ZoneReact(int z, int kind, int n, csmFloat32 x, csmFloat32 y)
         && _perfClock - _lastReactLineAt > 1.5f)
     {
         _lastReactLineAt = _perfClock;
-        StartTalk(EstimateTalkDur(line.c_str()), line.c_str());
-        _port->ShowBubble(line.c_str(), NULL, 0, 2.6f);
+        ShowPetBubble(line, {}, {}, {}, 2.6f);   // 口型在 PresentBubble 上屏时起（排队时不预动嘴）
         FeedPush("say", line);
     }
     printf("[pet] %s%s → %s%s%s「%s」\n", TouchVerb(ZoneKey(z), kind == 1), ZoneLabel(z),

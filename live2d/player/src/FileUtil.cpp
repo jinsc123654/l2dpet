@@ -44,18 +44,46 @@ csmByte* ReadModel3(const char* path, csmSizeInt* outSize)
     }
     std::vector<std::string> exps, idles, extras;
     const std::string dir = DirName(path);
-    std::vector<std::string> dirNames;
-    if (plat::ListDir(dir, &dirNames))
-    {
-        for (size_t di = 0; di < dirNames.size(); ++di)
+    // 表情名 = 文件名去 .exp3.json（不含所在子目录；Name 供人认，File 才是加载路径）
+    auto expLabel = [](const std::string& file) {
+        const size_t slash = file.rfind('/');
+        const std::string base = slash == std::string::npos ? file : file.substr(slash + 1);
+        return base.substr(0, base.size() - 10);
+    };
+    auto addExp = [&](const std::string& rel) {
+        const std::string label = expLabel(rel);
+        for (size_t k = 0; k < exps.size(); ++k)
         {
-            const std::string& n = dirNames[di];
-            if (needExp && n.size() > 10 && n.compare(n.size() - 10, 10, ".exp3.json") == 0) exps.push_back(n);
-            if (needMot && n.size() > 13 && n.compare(n.size() - 13, 13, ".motion3.json") == 0)
+            if (expLabel(exps[k]) == label) return;   // 同名两份（根目录/子目录）：先扫到的为准
+        }
+        exps.push_back(rel);
+    };
+    // motions=false 的调用只补表情：VTS 发货格式常把 exp3 放在 EXP/ 这种一层子目录里，
+    // 只扫根目录会漏掉作者的"水印"开关 → 角色身上一直带着版权字样（见文件头注释）
+    auto collect = [&](const std::string& where, const std::string& prefix, bool motions) {
+        std::vector<std::string> names;
+        if (!plat::ListDir(where, &names)) return;
+        for (size_t di = 0; di < names.size(); ++di)
+        {
+            const std::string& n = names[di];
+            if (needExp && n.size() > 10 && n.compare(n.size() - 10, 10, ".exp3.json") == 0) addExp(prefix + n);
+            if (motions && needMot && n.size() > 13 && n.compare(n.size() - 13, 13, ".motion3.json") == 0)
             {
                 std::string low = n;
                 for (size_t i = 0; i < low.size(); ++i) low[i] = (char)tolower((unsigned char)low[i]);
                 (low.find("idle") != std::string::npos ? idles : extras).push_back(n);
+            }
+        }
+    };
+    collect(dir, "", true);
+    if (needExp)
+    {
+        std::vector<std::string> subs;
+        if (plat::ListDir(dir, &subs))
+        {
+            for (size_t di = 0; di < subs.size(); ++di)
+            {
+                if (plat::IsDir(plat::Join(dir, subs[di]))) collect(plat::Join(dir, subs[di]), subs[di] + "/", false);
             }
         }
     }
@@ -81,7 +109,7 @@ csmByte* ReadModel3(const char* path, csmSizeInt* outSize)
         ins += "\"Expressions\":[";
         for (size_t i = 0; i < exps.size(); ++i)
         {
-            ins += (i ? ",{\"Name\":" : "{\"Name\":") + jstr(exps[i].substr(0, exps[i].size() - 10)) + ",\"File\":" + jstr(exps[i]) + "}";
+            ins += (i ? ",{\"Name\":" : "{\"Name\":") + jstr(expLabel(exps[i])) + ",\"File\":" + jstr(exps[i]) + "}";
         }
         ins += "],";
     }
