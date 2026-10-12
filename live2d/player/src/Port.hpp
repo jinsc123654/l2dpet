@@ -98,12 +98,15 @@ public:
         (void)zoom;
     }
 
-    /** 上次保存的窗口位置（桌宠）：left = 窗口左边 x，bottomGap = 窗口底边到屏幕底的距离（像素，<0 = 没存过）。
-     *  只在窗口第一次显示之前生效（启动时先知道大小和位置再映射，不会"先大后小、跑偏"）。 */
-    virtual void SetSavedPlacement(int left, int bottomGap)
+    /** 上次保存的窗口位置（桌宠）：left = 窗口左边 x，bottomGap = 窗口底边到屏幕底的距离（像素）。
+     *  两个值都可以是负数（拖到屏幕外时就是这样）；valid=false 表示还没存过。
+     *  窗口还没显示就先记住（启动时先知道大小和位置再映射）；已经显示了但用户还没自己拖过，
+     *  就在这里补上（配置来得比端口的兜底等待晚时，否则位置会一直用默认值）。 */
+    virtual void SetSavedPlacement(int left, int bottomGap, bool valid)
     {
         (void)left;
         (void)bottomGap;
+        (void)valid;
     }
 
     /** 把窗口整个挪回屏幕内（面板「窗口」页的"拉回屏幕内"；她要是真被拖丢了，一键找回来）。

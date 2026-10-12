@@ -325,7 +325,7 @@ const std::pair<const char*, const char*> kEn[] = {
     { "开启后拖动/滚轮不再挪动或缩放她（防误操作）；这里的滑条仍可改", "While on, dragging and the wheel no longer move or resize her (stops accidents); the sliders here still work" },
     { "位置", "Position" },
     { "还没记录位置（默认停在屏幕左下角）", "No position saved yet (she starts at the bottom-left of the screen)" },
-    { "左边距 {} px · 底边距 {} px；拖到屏幕外也会按原样恢复", "Left {} px · from bottom {} px; restored exactly, even off-screen" },
+    { "左边距 {} px · 底边距 {} px（负数表示伸到屏幕外）；重启按原样恢复", "Left {} px · from bottom {} px (negative = hangs off the screen); restored exactly" },
     { "拉回屏幕内", "Bring back on screen" },
     { "已把她拉回屏幕内", "Moved her back on screen" },
 
@@ -872,7 +872,7 @@ const std::pair<const char*, const char*> kJa[] = {
       "オンにするとドラッグ/ホイールで動かなくなる（誤操作防止）。ここのスライダーは有効" },
     { "位置", "位置" },
     { "还没记录位置（默认停在屏幕左下角）", "位置はまだ記録なし（既定は画面の左下）" },
-    { "左边距 {} px · 底边距 {} px；拖到屏幕外也会按原样恢复", "左 {} px · 下から {} px。画面外にドラッグしてもそのまま復元" },
+    { "左边距 {} px · 底边距 {} px（负数表示伸到屏幕外）；重启按原样恢复", "左 {} px · 下から {} px（負の値は画面外にはみ出し）。そのまま復元" },
     { "拉回屏幕内", "画面内に戻す" },
     { "已把她拉回屏幕内", "画面内に戻しました" },
 

@@ -466,11 +466,44 @@ public:
         return true;
     }
 
-    void SetSavedPlacement(int left, int bottomGap) override
+    void SetSavedPlacement(int left, int bottomGap, bool valid) override
     {
-        if (!_mapPending) return;   // 只管第一次显示
         _savedL = left;
         _savedB = bottomGap;
+        _savedValid = valid;
+        if (_mapPending || !valid || _placementDone || _movedByUser)
+        {
+            return;   // 还没显示（MapInitial 会用）/ 没存过 / 已经落位过 / 用户自己拖过了
+        }
+        // 配置来得比 1.5 秒兜底还晚：窗口已经按默认位置显示了，这里把存档位置补上
+        // （以前只有"显示前"那一支会用存档位置，配置一慢，她就永远停在默认的左下角）
+        ApplySavedPlacement();
+    }
+
+    /** 把窗口挪到存档位置（和启动恢复同一套钳制：允许伸出屏幕，只保证留一块抓得到的） */
+    void ApplySavedPlacement()
+    {
+        if (!_savedValid || _dpy == NULL || _win == 0)
+        {
+            return;
+        }
+        const int sw = DisplayWidth(_dpy, DefaultScreen(_dpy));
+        const int sh = DisplayHeight(_dpy, DefaultScreen(_dpy));
+        const int nx = ClampKeepVisible(_savedL, 0, sw, _w);
+        const int ny = ClampKeepVisible(sh - _savedB - _h, 0, sh, _h);
+        _placementDone = true;
+        if (nx == _winX && ny == _winY)
+        {
+            return;
+        }
+        _winX = nx;
+        _winY = ny;
+        XMoveWindow(_dpy, _win, _winX, _winY);
+        _shapeCountdown = 0;
+        _bubReposAt = (float)(NowSec() + 0.08);
+        XFlush(_dpy);
+        printf("[port:pet] 补上存档位置 → %d,%d\n", _winX, _winY);
+        fflush(stdout);
     }
 
     /** 至少留在屏幕里的像素：窗口越大留得越多（保证还抓得到、也看得见她的脸），但不超过一半 */
@@ -503,10 +536,11 @@ public:
         const int sw = DisplayWidth(_dpy, DefaultScreen(_dpy));
         const int sh = DisplayHeight(_dpy, DefaultScreen(_dpy));
         int x = wa[0], y = wa[1] + wa[3] - _h;   // 默认：工作区左下角（任务栏/Dock 之上）
-        if (_savedL >= 0 && _savedB >= 0)
+        if (_savedValid)
         {
             x = _savedL;
-            y = sh - _savedB - _h;
+            y = sh - _savedB - _h;   // pos_b 可以是负数（有一截在屏幕下方）：原样还原
+            _placementDone = true;
         }
         _winX = ClampKeepVisible(x, 0, sw, _w);
         _winY = ClampKeepVisible(y, 0, sh, _h);
@@ -524,17 +558,20 @@ public:
         _shapeCountdown = 0;
         XFlush(_dpy);
         printf("[port:pet] 首次显示 %dx%d @ %d,%d（%s）\n", _w, _h, _winX, _winY,
-               _savedL >= 0 && _savedB >= 0 ? "上次的位置" : "工作区左下角");
+               _savedValid ? "上次的位置" : "工作区左下角");
         fflush(stdout);
     }
 
-    /** 记住位置：左边 x + 底边离屏幕底的距离（缩放以底边为基准，所以存"底"而不是"顶"） */
+    /** 记住位置：左边 x + 底边离屏幕底的距离（缩放以底边为基准，所以存"底"而不是"顶"）。
+     *  两个值都**允许是负数**：把她拖到屏幕外时（左边甚至可能为负、底边距可以为负=有一截在屏幕下方）
+     *  要原样存下来，重启后才回得去——2026-10-12 以前这里把底边距钳到 ≥0，于是"拖到屏幕下沿外"
+     *  会被存成"贴齐屏幕底边"，重启后整块都回到屏内（用户看到的就是"重启后强制全身显示"） */
     void SavePlacement()
     {
         const int sh = DisplayHeight(_dpy, DefaultScreen(_dpy));
-        char b[128];
-        snprintf(b, sizeof(b), "{\"cmd\":\"config\",\"set\":{\"pos_l\":%d,\"pos_b\":%d}}", _winX,
-                 std::max(0, sh - (_winY + _h)));
+        char b[160];
+        snprintf(b, sizeof(b), "{\"cmd\":\"config\",\"set\":{\"pos_l\":%d,\"pos_b\":%d,\"pos_set\":1}}",
+                 _winX, sh - (_winY + _h));
         _portCmds.push_back(b);
     }
 
@@ -1670,6 +1707,7 @@ private:
                     if (!_dragging && dx * dx + dy * dy > 25)
                     {
                         _dragging = true;
+                        _movedByUser = true;   // 用户自己挪的：之后不再按存档位置搬她
                     }
                     if (_dragging)
                     {
@@ -1889,7 +1927,10 @@ private:
     float _zoom = 1.0f;
     bool _mapPending = false;              // 窗口还没第一次显示（等尺寸/位置定好）
     double _mapWaitSince = 0.0;            // 开始等 SetZoom 的时刻（Present 兜底用）
-    int _savedL = -1, _savedB = -1;        // 存档位置（SetSavedPlacement）                    // 整窗缩放
+    int _savedL = -1, _savedB = -1;        // 存档位置（SetSavedPlacement；都可以是负数）
+    bool _savedValid = false;              // 存过位置没有（不能拿 -1 判断：负坐标是合法的）
+    bool _placementDone = false;           // 存档位置已经落位过（别再被后来的配置事件来回搬）
+    bool _movedByUser = false;             // 用户自己拖过：之后一律以他为准
     int _srcW = 0, _srcH = 0;              // 播放器渲染帧尺寸
     bool _hidden = false;
     bool _winMapped = false;               // 窗口在屏幕上（Map/UnmapNotify 维护）：气泡跟着它收放

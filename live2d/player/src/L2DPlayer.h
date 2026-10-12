@@ -2112,7 +2112,8 @@ public:
             { "top", 1, 0, 1, "总在最前" },                 { "passthrough", 0, 0, 1, "鼠标穿透" },
             { "lock", 0, 0, 1, "锁定大小和位置" },
             // 窗口位置（拖动/缩放后由桌宠端口自动保存；-1 = 没存过 → 默认贴工作区左下角）
-            { "pos_l", -1, -1, 20000, "窗口左边 x（像素）" }, { "pos_b", -1, -1, 20000, "窗口底边距屏幕底（像素）" },
+            { "pos_l", -1, -1, 20000, "窗口左边 x（像素）" }, { "pos_b", -1, -1, 20000, "窗口底边距屏幕底（像素，可为负）" },
+            { "pos_set", 0, 0, 1, "位置已记录（内部：区分「还没存过」和「负坐标」）" },
             { "llm_idle", 1, 0, 1, "LLM 闲时表演" },        { "llm_period", 60, 20, 600, "闲时表演间隔（秒）" },
             { "llm_token_tier", 1, 0, 3, "Token 节省档位" },
             { "llm_questions", 1, 0, 1, "LLM 可以提问" },
@@ -2260,7 +2261,8 @@ public:
             if (_port != NULL && _port->Name() != NULL
                 && (strcmp(_port->Name(), "pet") == 0 || strcmp(_port->Name(), "glfwpet") == 0))
             {
-                _port->SetSavedPlacement((int)Cfg("pos_l"), (int)Cfg("pos_b"));   // 首次显示前才生效
+                // 首次显示前记住 / 配置来得晚时补上（见 PortX11Pet::SetSavedPlacement）
+                _port->SetSavedPlacement((int)Cfg("pos_l"), (int)Cfg("pos_b"), Cfg("pos_set") > 0.5f);
                 _port->SetZoom(uiZoom);
                 SetRenderZoom(1.0f);   // 渲染始终满幅（端口负责整体缩放）
             }

@@ -1645,11 +1645,13 @@ void PageWindow(Pen& p)
 
     // 位置：显示存档坐标（以前存了却看不到），并给一个"被拖丢了"时的找回按钮
     const Value& wcfg = S.st.get("config");
-    const int posL = (int)wcfg.get("pos_l").numOr(-1);
-    const int posB = (int)wcfg.get("pos_b").numOr(-1);
-    const std::string posLine = (posL < 0 || posB < 0)
+    const int posL = (int)wcfg.get("pos_l").numOr(0);
+    const int posB = (int)wcfg.get("pos_b").numOr(0);
+    const bool posSet = wcfg.get("pos_set").numOr(0) > 0.5;
+    const std::string posLine = !posSet
         ? i18n::T("还没记录位置（默认停在屏幕左下角）")
-        : i18n::TF("左边距 {} px · 底边距 {} px；拖到屏幕外也会按原样恢复", { std::to_string(posL), std::to_string(posB) });
+        : i18n::TF("左边距 {} px · 底边距 {} px（负数表示伸到屏幕外）；重启按原样恢复",
+                   { std::to_string(posL), std::to_string(posB) });
     Section(p, "sec.place", "位置");
     const float posH = TextH(posLine, p.w - 36.0f, 12.5f, 20.0f);
     Card(p.ui, "place.card", p.x, p.y, p.w, posH + 76.0f);
