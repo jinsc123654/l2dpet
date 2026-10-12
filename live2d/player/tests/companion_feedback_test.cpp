@@ -32,8 +32,10 @@ int main()
     assert(japanese.shown && !japanese.speech.empty());
     auto newTurn = pet.Receive("started", "Codex", "New work", "turn5", 38, 30, true, false, "zh");
     assert(newTurn.shown);
-    for (int i = 0; i < 40; ++i)
+    for (int i = 0; i < 80; ++i)
         pet.Receive("completed", "Codex", "message " + std::to_string(i), "turn" + std::to_string(i + 10), 50 + i, 30, true, false, "zh");
-    assert(pet.Events().size() == 20);
+    assert(pet.Events().size() == 60);
+    assert(pet.Events().front().message == "message 20");
+    assert(pet.Events().back().message == "message 79");
     std::cout << "PASS companion deduplication, throttling, priorities, choices, disable switch, truthful completion, languages and bounded history\n";
 }

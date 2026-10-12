@@ -254,6 +254,10 @@ cmd_start() {
         say "（dry-run）会执行：$BIN $*"
         return 0
     fi
+    # 告诉子进程"启动器是谁"（面板「关于」页的"开机自启"要把自启项指向启动器，而不是裸二进制、
+    # 更不是 AppImage 的临时挂载点；见 panel/app.cpp 的 AutostartTarget）。子进程继承环境变量。
+    L2DPET_LAUNCHER=$(self_exec)
+    export L2DPET_LAUNCHER
     if [ "${L2DPET_FOREGROUND:-0}" = "1" ]; then
         say "前台运行（Ctrl-C 退出）：$BIN $*"
         exec "$BIN" "$@"

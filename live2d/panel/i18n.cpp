@@ -505,6 +505,15 @@ const std::pair<const char*, const char*> kEn[] = {
     { "打开模型目录", "Open model folder" },
     { "配置 · {}", "Config · {}" },
     { "模型库 · {}", "Models · {}" },
+    { "启动", "Startup" },
+    { "开机自启", "Start at login" },
+    { "登录后自动把她放出来（当前用户级启动项，不需要管理员）",
+      "Bring her up automatically when you log in (per-user startup entry, no admin needed)" },
+    { "登录后自动把她放出来（写 ~/.config/autostart 的用户级自启项）",
+      "Bring her up automatically when you log in (writes a per-user entry in ~/.config/autostart)" },
+    { "已设为开机自启", "Will start at login" },
+    { "已取消开机自启", "No longer starts at login" },
+    { "改不了启动项（权限或系统限制）", "Could not change the startup entry (permissions or system policy)" },
 
     // ---------------------------------------------------------------- 右键菜单
     { "哄哄她", "Coax her" },
@@ -1062,6 +1071,15 @@ const std::pair<const char*, const char*> kJa[] = {
     { "打开模型目录", "モデルフォルダを開く" },
     { "配置 · {}", "設定 · {}" },
     { "模型库 · {}", "モデル · {}" },
+    { "启动", "起動" },
+    { "开机自启", "ログイン時に起動" },
+    { "登录后自动把她放出来（当前用户级启动项，不需要管理员）",
+      "ログインしたら自動で起動します（ユーザー単位のスタートアップ登録、管理者権限は不要）" },
+    { "登录后自动把她放出来（写 ~/.config/autostart 的用户级自启项）",
+      "ログインしたら自動で起動します（~/.config/autostart にユーザー単位で登録）" },
+    { "已设为开机自启", "ログイン時に起動するようにしました" },
+    { "已取消开机自启", "ログイン時の起動を解除しました" },
+    { "改不了启动项（权限或系统限制）", "スタートアップ登録を変更できません（権限またはシステム制限）" },
 
     // ---------------------------------------------------------------- 右键菜单
     { "哄哄她", "なだめる" },

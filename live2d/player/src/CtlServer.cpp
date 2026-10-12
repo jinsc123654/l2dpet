@@ -268,7 +268,16 @@ bool CtlServer::Start(int port)
     }
     int one = 1;
 
+#if defined(_WIN32)
+    // Windows 的 SO_REUSEADDR 语义和 Unix 不同：它允许**抢占**别人正在监听的端口。
+    // 后果实测过：第二只桌宠绑定成功、正常运行，还把 control-token 覆盖成自己的
+    // ——先跑的那只令牌对不上，面板/外部工具再也认证不进去（"已经在跑就退出"的判定形同虚设）。
+    // SO_EXCLUSIVEADDRUSE 才是"端口被占就 bind 失败"的那个选项。
+    setsockopt(_impl->listenFd, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (const char*)&one, sizeof(one));
+#else
+    // Unix 侧两种语义都行（别人在 listen 时 bind 一定失败），保留 SO_REUSEADDR 只为 TIME_WAIT 重启。
     setsockopt(_impl->listenFd, SOL_SOCKET, SO_REUSEADDR, (const char*)&one, sizeof(one));
+#endif
     sockaddr_in addr;
 
     memset(&addr, 0, sizeof(addr));

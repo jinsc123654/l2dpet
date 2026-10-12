@@ -355,6 +355,13 @@ LRESULT CALLBACK PortGlfwPet::HitTestWndProc(HWND hwnd, UINT msg, WPARAM wp, LPA
 {
     if (msg == WM_NCHITTEST && s_hitPort != NULL)
     {
+        // 鼠标穿透：整个角色窗口都不吃鼠标，点角色也穿给下面的窗口（等价于 Linux 侧清空 XShape
+        // 输入区域）。说话气泡是**另一个窗口**，不受这里影响 —— 所以穿透开着时，带选项的气泡
+        // 照样能点（要的就是这个：穿透不该连带把选项也穿掉）。
+        if (s_hitPort->_passthrough)
+        {
+            return HTTRANSPARENT;
+        }
         POINT pt;
         pt.x = (int)(short)LOWORD(lp);   // WM_NCHITTEST 的坐标是屏幕坐标
         pt.y = (int)(short)HIWORD(lp);
@@ -558,13 +565,13 @@ bool PortGlfwPet::Initialize(const PortConfig& cfg)
     glfwSetWindowUserPointer(_win, this);
     glfwSetScrollCallback(_win, [](GLFWwindow* w, double dx, double dy) {
         PortGlfwPet* p = (PortGlfwPet*)glfwGetWindowUserPointer(w);
-        if (p != NULL && dy != 0.0) p->_wheel += dy > 0 ? 1 : -1;
+        if (p != NULL && !p->_passthrough && dy != 0.0) p->_wheel += dy > 0 ? 1 : -1;
     });
     // 鼠标按键（Linux：主输入源；XShape 保证只有点到角色才会到达本窗口）
     glfwSetMouseButtonCallback(_win, [](GLFWwindow* w, int button, int action, int mods) {
         (void)mods;
         PortGlfwPet* p = (PortGlfwPet*)glfwGetWindowUserPointer(w);
-        if (p == NULL) return;
+        if (p == NULL || p->_passthrough) return;
         double cx = 0, cy = 0;
         glfwGetCursorPos(w, &cx, &cy);
         const int rx = p->_winX + (int)cx, ry = p->_winY + (int)cy;
@@ -576,11 +583,11 @@ bool PortGlfwPet::Initialize(const PortConfig& cfg)
                 // 真实事件，两边都到得了这里，所以放在平台分支外面。
                 p->_uiEvents.push_back("{\"event\":\"ui_close_menu\"}");   // 点她身上 = 收菜单（兜底）
                 p->_menuOpen = false;
-#if defined(__linux__)
-                // 只有 Linux 把窗口事件当主输入源（XShape 保证事件只来自角色轮廓）。
-                // Win/Mac 的按下/拖动/抬起统一由 PumpGlobalInput 的全局轮询处理，
-                // 这里再写一份会重复触发（于是状态机被两路输入打架）。
+#if defined(__linux__) || defined(_WIN32)
+                // Windows 按下也以真实窗口事件为准；全局位置只用于持续拖动。
+                if (p->_passthrough) return;
                 p->_pressed = true;
+                fprintf(stderr, "[glfwpet] model press lock=%d passthrough=%d\n", (int)p->_lock, (int)p->_passthrough);
                 p->_dragging = false;
                 p->_pressRootX = rx;
                 p->_pressRootY = ry;
@@ -593,7 +600,13 @@ bool PortGlfwPet::Initialize(const PortConfig& cfg)
             else if (action == GLFW_RELEASE)
             {
 #if defined(__linux__)
-                if (!p->_dragging)
+                if (!p->_pressed || p->_passthrough) return;
+                if (p->_dragging)
+                {
+                    p->SavePlacement();
+                    fprintf(stderr, "[glfwpet] drag finished at %d,%d\n", p->_winX, p->_winY);
+                }
+                else
                 {
                     p->_clickPending = true;
                     p->_clickX = (int)cx;
@@ -605,7 +618,7 @@ bool PortGlfwPet::Initialize(const PortConfig& cfg)
 #endif
             }
         }
-#if defined(__linux__)
+#if defined(__linux__) || defined(_WIN32)
         else if (button == GLFW_MOUSE_BUTTON_RIGHT && action == GLFW_PRESS)
         {
             p->PushRightMenu(rx, ry);
@@ -638,9 +651,10 @@ bool PortGlfwPet::Initialize(const PortConfig& cfg)
             const Atom utility = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_UTILITY", False);
             XChangeProperty(dpy, xw, type, XA_ATOM, 32, PropModeReplace, (unsigned char*)&utility, 1);
             const Atom state = XInternAtom(dpy, "_NET_WM_STATE", False);
-            Atom states[2] = { XInternAtom(dpy, "_NET_WM_STATE_SKIP_TASKBAR", False),
-                               XInternAtom(dpy, "_NET_WM_STATE_SKIP_PAGER", False) };
-            XChangeProperty(dpy, xw, state, XA_ATOM, 32, PropModeReplace, (unsigned char*)states, 2);
+            Atom states[3] = { XInternAtom(dpy, "_NET_WM_STATE_SKIP_TASKBAR", False),
+                               XInternAtom(dpy, "_NET_WM_STATE_SKIP_PAGER", False),
+                               XInternAtom(dpy, "_NET_WM_STATE_ABOVE", False) };
+            XChangeProperty(dpy, xw, state, XA_ATOM, 32, PropModeReplace, (unsigned char*)states, _appliedTop ? 3 : 2);
             const Atom pidAtom = XInternAtom(dpy, "_NET_WM_PID", False);
             const unsigned long pid = (unsigned long)plat::CurrentPid();
             XChangeProperty(dpy, xw, pidAtom, XA_CARDINAL, 32, PropModeReplace, (unsigned char*)&pid, 1);
@@ -708,7 +722,7 @@ bool PortGlfwPet::Present(const uint32_t* fb, int width, int height)
 #if defined(__linux__)
     if (--_shapeCountdown <= 0 && !_pressed)
     {
-        UpdateInputShape(src);
+        UpdateInputShape(_lastFrame);   // 输入区域只取模型，排除悬停/点击特效
         _shapeCountdown = 15;
     }
 #endif
@@ -866,14 +880,21 @@ void PortGlfwPet::PumpGlobalInput()
         downR = false;
     }
 #else
-    // Win/Mac：整窗穿透 → 只能靠全局轮询（软件命中）；菜单打开期间抑制宠物点击
-    if (_menuOpen) down = false;
+    // Windows：按下走窗口事件，轮询全局位置和释放；macOS 同时轮询按下。
     GlobalMouse(&rx, &ry, &down, &downR);
+    // 抑制都在轮询**之后**判（GlobalMouse 会覆盖 down/downR，写在前面就是死代码）：
+    //   · macOS 菜单开着时抑制全局点击；Windows 由窗口事件区分接收者；
+    //   · 鼠标穿透：她整个不吃鼠标（拖不动、点不到，右键菜单也不弹）——Linux 侧靠把输入区域清空
+    //     达到同样效果（见 UpdateInputShape）。
+#if !defined(_WIN32)
+    if (_menuOpen) { down = false; downR = false; }
+#endif
+    if (_passthrough) { down = false; downR = false; }
 #endif
     const int wx = rx - _winX;
     const int wy = ry - _winY;
 
-#if !defined(__linux__)
+#if defined(__APPLE__)
     // 按下边沿（仅 Win/Mac：Linux 走窗口回调）
     // 整窗穿透 + 全局轮询下，**任何**窗口上的按下都会走到这里，所以按下时先判一次
     // "这次算不算落在角色轮廓上"（Linux 侧靠 XShape 把输入区域收窄到轮廓，天然没有这个问题）。
@@ -902,7 +923,9 @@ void PortGlfwPet::PumpGlobalInput()
     if (!down && _dragging)
     {
         _dragging = false;
+        _pressed = false;   // 拖动释放不能再算一次点击
         SavePlacement();
+        fprintf(stderr, "[glfwpet] drag finished at %d,%d\n", _winX, _winY);
     }
     // 拖动 / 滑动 / 抬起（两条输入源共用这段）；锁定大小和位置时拖动不生效（按下抬起仍算一次点击）
     if (down && _pressed && !_lock)
@@ -1308,6 +1331,8 @@ void PortGlfwPet::RefreshFromState()
             {
                 _appliedTop = v;
                 glfwSetWindowAttrib(_win, GLFW_FLOATING, v ? GLFW_TRUE : GLFW_FALSE);
+                if (_bw != NULL) glfwSetWindowAttrib(_bw, GLFW_FLOATING, v ? GLFW_TRUE : GLFW_FALSE);
+                fprintf(stderr, "[glfwpet] top=%d (model+bubble)\n", (int)v);
             }
         }
         q = cfg.find("\"passthrough\"");
@@ -1318,7 +1343,33 @@ void PortGlfwPet::RefreshFromState()
             const bool v = JsonReadBool(cfg, q == std::string::npos ? cfg.size() : q + 1, &found);
             if (found && v != _passthrough)
             {
+                if (_dragging) SavePlacement();
                 _passthrough = v;
+                _pressed = false;
+                _dragging = false;
+                _wasDown = false;
+                _wasDownR = false;
+                fprintf(stderr, "[glfwpet] model passthrough=%d\n", (int)v);
+                // 穿透要的是"整个角色窗口不吃鼠标，点她穿给**下面的程序**"。WM_NCHITTEST 返回
+                // HTTRANSPARENT 只对同一个线程的窗口之间有效，跨进程穿不过去（实测：点她时后面的
+                // 资源管理器/记事本收不到），所以这里用 Windows 的整窗穿透 WS_EX_TRANSPARENT
+                // （GLFW 的 MOUSE_PASSTHROUGH：Win32 上就是设/清这个扩展样式）。
+                // 逐像素命中（HitTestWndProc）只在"没穿透"时用；穿透时它也会返回 HTTRANSPARENT，
+                // 两条路一起保证同线程/跨进程都不吃鼠标。
+#if !defined(__linux__) && !defined(__APPLE__)
+                glfwSetWindowAttrib(_win, GLFW_MOUSE_PASSTHROUGH, v ? GLFW_TRUE : GLFW_FALSE);
+#endif
+#if defined(__linux__)
+                if (v)
+                {
+                    Display* dpy = glfwGetX11Display();
+                    XUngrabPointer(dpy, CurrentTime);   // 清除拖动时的隐式 grab，否则清空 shape 仍会收到鼠标事件
+                    XShapeCombineRectangles(dpy, glfwGetX11Window(_win), ShapeInput, 0, 0,
+                                            NULL, 0, ShapeSet, Unsorted);
+                    XFlush(dpy);
+                }
+#endif
+                // Linux 使用 XShape，不能再叠加 GLFW 整窗穿透；macOS 保留软件命中所需的整窗穿透。
                 _shapeCountdown = 0;   // 下一帧重扫输入区域
             }
         }
@@ -1526,7 +1577,8 @@ bool PortGlfwPet::EnsureBubbleWindow(int w, int h)
 #endif
     glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
     glfwWindowHint(GLFW_DECORATED, GLFW_FALSE);
-    glfwWindowHint(GLFW_FLOATING, GLFW_TRUE);
+    glfwWindowHint(GLFW_FLOATING, _appliedTop ? GLFW_TRUE : GLFW_FALSE);
+    glfwWindowHint(GLFW_MOUSE_PASSTHROUGH, GLFW_FALSE);
     glfwWindowHint(GLFW_TRANSPARENT_FRAMEBUFFER, GLFW_TRUE);
     glfwWindowHint(GLFW_FOCUS_ON_SHOW, GLFW_FALSE);
     glfwWindowHint(GLFW_SCALE_TO_MONITOR, GLFW_FALSE);
@@ -1534,6 +1586,11 @@ bool PortGlfwPet::EnsureBubbleWindow(int w, int h)
     _bw = glfwCreateWindow(w, h, "l2dpet-bubble", NULL, _win);
     if (_bw == NULL) return false;
     PetHideFromTaskbar(_bw);   // 气泡窗口同样不进任务栏
+#if defined(_WIN32)
+    // 作为模型的 owned window，一起升降，并保持气泡在模型上方。
+    SetWindowLongPtrW(glfwGetWin32Window(_bw), GWLP_HWNDPARENT,
+                      (LONG_PTR)glfwGetWin32Window(_win));
+#endif
     glfwSetWindowUserPointer(_bw, this);
     glfwSetKeyCallback(_bw, &PortGlfwPet::BubbleKeyCb);
     glfwSetMouseButtonCallback(_bw, &PortGlfwPet::BubbleMouseBtnCb);
@@ -1551,13 +1608,14 @@ bool PortGlfwPet::EnsureBubbleWindow(int w, int h)
         if (dpy != NULL && xw != 0)
         {
             const Atom type = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE", False);
-            const Atom tooltip = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_TOOLTIP", False);
-            XChangeProperty(dpy, xw, type, XA_ATOM, 32, PropModeReplace, (unsigned char*)&tooltip, 1);
+            const Atom utility = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_UTILITY", False);
+            XChangeProperty(dpy, xw, type, XA_ATOM, 32, PropModeReplace, (unsigned char*)&utility, 1);
+            XSetTransientForHint(dpy, xw, glfwGetX11Window(_win));
             const Atom state = XInternAtom(dpy, "_NET_WM_STATE", False);
             Atom states[3] = { XInternAtom(dpy, "_NET_WM_STATE_SKIP_TASKBAR", False),
                                XInternAtom(dpy, "_NET_WM_STATE_SKIP_PAGER", False),
                                XInternAtom(dpy, "_NET_WM_STATE_ABOVE", False) };
-            XChangeProperty(dpy, xw, state, XA_ATOM, 32, PropModeReplace, (unsigned char*)states, 3);
+            XChangeProperty(dpy, xw, state, XA_ATOM, 32, PropModeReplace, (unsigned char*)states, _appliedTop ? 3 : 2);
             XFlush(dpy);
         }
     }

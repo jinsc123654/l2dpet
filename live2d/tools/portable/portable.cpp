@@ -319,6 +319,18 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int)
         cmd += tail;
     }
 
+    // 让子进程知道"用户手里那个启动器"是谁：设置面板里的"开机自启"要把启动项指向它，
+    // 不能指向这个解包目录（名字带 payload hash，每次版本更新都会换）。子进程继承环境变量，
+    // 桌宠再把它传给面板（见 panel/app.cpp 的 AutostartTarget）。
+    {
+        wchar_t self[MAX_PATH * 2];
+        const DWORD n = GetModuleFileNameW(hInst, self, (DWORD)(sizeof(self) / sizeof(self[0])));
+        if (n > 0 && n < (DWORD)(sizeof(self) / sizeof(self[0])))
+        {
+            SetEnvironmentVariableW(L"L2DPET_LAUNCHER", self);
+        }
+    }
+
     STARTUPINFOW si;
     ZeroMemory(&si, sizeof(si));
     si.cb = sizeof(si);

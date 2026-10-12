@@ -71,8 +71,10 @@ float EnvF(const char* k, float d)
 
 int EnvI(const char* k, int d)
 {
+    // 空值按"没设置"算：atoi("") = 0，会把 L2DPET_PAGE="" 误当成"打开设置窗口"（开机自启时弹面板），
+    // 也会把 L2DPET_PORT="" 变成端口 0。
     const char* v = std::getenv(k);
-    return v != nullptr ? std::atoi(v) : d;
+    return (v != nullptr && *v != '\0') ? std::atoi(v) : d;
 }
 
 #if !defined(_WIN32) && !defined(__APPLE__)
@@ -2983,6 +2985,124 @@ void PageExternal(Pen& p)
     }
 }
 
+// ---------------------------------------------------------------- 开机自启（关于页的开关）
+/** 自启要指向**启动器**，不能指向便携包解出来的那份：解包目录名带 payload hash，
+ *  换个版本就换目录，指过去就是一条死链。便携启动器会设 L2DPET_LAUNCHER=自身路径；
+ *  文件夹版/构建版没有这个变量 → 用面板同目录的桌宠 exe（双击它就会把面板一起拉起来）。*/
+std::string AutostartTarget()
+{
+    if (const char* launcher = getenv("L2DPET_LAUNCHER"))
+    {
+        if (*launcher) return launcher;
+    }
+    const std::string self = plat::SelfExePath();
+    const size_t slash = self.find_last_of("/\\");
+    const std::string dir = slash == std::string::npos ? std::string() : self.substr(0, slash + 1);
+#if defined(_WIN32)
+    return dir + "l2dtest.exe";
+#else
+    return dir + "l2dtest";
+#endif
+}
+
+#if defined(_WIN32)
+/** 当前用户的开机自启：HKCU 的 Run 键（不需要管理员，任务管理器"启动应用"里也能看到/禁用） */
+const wchar_t* kAutostartRunKey = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+const wchar_t* kAutostartRunValue = L"l2dpet";
+
+bool AutostartEnabled()
+{
+    HKEY key = NULL;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, kAutostartRunKey, 0, KEY_QUERY_VALUE, &key) != ERROR_SUCCESS) return false;
+    const LONG r = RegQueryValueExW(key, kAutostartRunValue, NULL, NULL, NULL, NULL);
+    RegCloseKey(key);
+    return r == ERROR_SUCCESS;
+}
+
+bool SetAutostart(bool on)
+{
+    HKEY key = NULL;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, kAutostartRunKey, 0, NULL, 0, KEY_SET_VALUE, NULL, &key, NULL) != ERROR_SUCCESS)
+    {
+        return false;
+    }
+    LONG r = ERROR_SUCCESS;
+    if (on)
+    {
+        const std::string target = AutostartTarget();
+        if (target.empty())
+        {
+            RegCloseKey(key);
+            return false;
+        }
+        std::wstring cmd = L"\"" + WideFromUtf8(target) + L"\"";   // 带空格/中文的路径必须加引号
+        r = RegSetValueExW(key, kAutostartRunValue, 0, REG_SZ, (const BYTE*)cmd.c_str(),
+                           (DWORD)((cmd.size() + 1) * sizeof(wchar_t)));
+    }
+    else
+    {
+        r = RegDeleteValueW(key, kAutostartRunValue);
+        if (r == ERROR_FILE_NOT_FOUND) r = ERROR_SUCCESS;   // 本来就没开
+    }
+    RegCloseKey(key);
+    return r == ERROR_SUCCESS;
+}
+#else
+/** Linux：XDG 自启项。打包里的启动器写的也是这个文件（l2dpet autostart on/off），
+ *  两边互不冲突——谁写的都是同一个自启入口，off 都是删掉它。 */
+std::string AutostartDesktopPath()
+{
+    return plat::HomeDir() + "/.config/autostart/l2dpet.desktop";
+}
+
+bool AutostartEnabled()
+{
+    return plat::Exists(AutostartDesktopPath());
+}
+
+/** Exec 的写法跟启动器一致：/usr/bin/env "<路径>"。
+ *  为什么套 env：GLib 展开 %% 之前要求第一个词是可执行文件，用 env 兜住路径里的转义；
+ *  路径里的 % 会被当字段码 → 必须写成 %%，引号/反引号/$ 也要转义。 */
+std::string AutostartExec(const std::string& path)
+{
+    std::string quoted = "\"";
+    for (size_t i = 0; i < path.size(); ++i)
+    {
+        const char c = path[i];
+        if (c == '%') quoted += "%%";
+        else if (c == '"' || c == '$' || c == '`' || c == '\\') { quoted += '\\'; quoted += c; }
+        else quoted += c;
+    }
+    quoted += "\"";
+    return "/usr/bin/env " + quoted;
+}
+
+bool SetAutostart(bool on)
+{
+    const std::string path = AutostartDesktopPath();
+    if (!on)
+    {
+        plat::RemoveFile(path);
+        return !plat::Exists(path);
+    }
+    const std::string target = AutostartTarget();
+    if (target.empty()) return false;
+    const size_t slash = path.find_last_of('/');
+    if (slash != std::string::npos && !plat::CreateDir(path.substr(0, slash), true)) return false;
+    std::string entry;
+    entry += "[Desktop Entry]\n";
+    entry += "Type=Application\n";
+    entry += "Name=Live2D Pet\n";
+    entry += "Name[zh_CN]=Live2D 桌宠\n";
+    entry += "Comment=Start the desktop pet at login\n";
+    entry += "Comment[zh_CN]=登录后自动启动桌宠\n";
+    entry += "Exec=" + AutostartExec(target) + "\n";
+    entry += "Terminal=false\n";
+    entry += "X-GNOME-Autostart-enabled=true\n";
+    return plat::WritePrivateFile(path, entry) && plat::Exists(path);
+}
+#endif
+
 void PageAbout(Pen& p)
 {
     PageTitle(p, "关于");
@@ -3043,6 +3163,32 @@ void PageAbout(Pen& p)
         Text(p.ui, "about.dirs.models.path", p.x + 18.0f, top + 80.0f, p.w - 36.0f, 20.0f,
              i18n::TF("模型库 · {}", { modelsDir }), 12.0f, kMuted);
         p.y = top + cardH2 + 18.0f;
+    }
+
+    // 开机自启：写当前用户的启动项（Windows = HKCU 的 Run 键；Linux = ~/.config/autostart 的 .desktop）。
+    // 开关状态**以系统为准**（每次排版都读一次）：用户可能在任务管理器/文件里改过，别显示成另一种真相。
+    Section(p, "about.boot", "启动");
+    {
+        const bool on = AutostartEnabled();
+        const float top = p.y + 2.0f;
+        Card(p.ui, "about.boot.card", p.x, top, p.w, 56.0f);
+        Text(p.ui, "about.boot.l", p.x + 18.0f, top + 9.0f, p.w - 110.0f, 22.0f, "开机自启", 15.0f, kText, 500);
+#if defined(_WIN32)
+        const char* hint = "登录后自动把她放出来（当前用户级启动项，不需要管理员）";
+#else
+        const char* hint = "登录后自动把她放出来（写 ~/.config/autostart 的用户级自启项）";
+#endif
+        Text(p.ui, "about.boot.h", p.x + 18.0f, top + 31.0f, p.w - 110.0f, 20.0f, hint, 12.5f, kMuted);
+        p.ui.stack("about.boot.sw.wrap").position(p.x + p.w - 74.0f, top + 14.0f).size(56.0f, 28.0f).content([&] {
+            components::toggleSwitch(p.ui, "about.boot.sw").theme(Th()).size(56.0f, 28.0f).checked(on)
+                .onChange([](bool v) {
+                    const bool ok = SetAutostart(v);
+                    Toast(ok ? i18n::T(v ? "已设为开机自启" : "已取消开机自启")
+                             : i18n::T("改不了启动项（权限或系统限制）"));
+                    app::requestUpdate();   // 下一帧重新读系统状态，开关跟着回到实际值
+                }).build();
+        }).build();
+        p.y = top + 56.0f + 18.0f;
     }
 }
 
@@ -3171,7 +3317,6 @@ void ComposeMenu(eui::Ui& ui, const eui::Screen& screen)
                         app::closeWindow("menu");
                         break;
                     case MI_TOGGLE: SetCfg(copy.cmd, copy.checked ? 0.0f : 1.0f);
-                        if (copy.cmd == "passthrough" && !copy.checked) { S.page = P_WINDOW; app::showMainWindow(); }
                         app::closeWindow("menu"); break;
                     case MI_SUB: case MI_BACK: {
                         S.menuLevel = copy.kind == MI_BACK ? 0 : copy.sub;

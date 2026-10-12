@@ -155,12 +155,9 @@ public:
                              XInternAtom(_dpy, "_NET_WM_STATE_SKIP_PAGER", False) };
             XChangeProperty(_dpy, _win, state, XA_ATOM, 32, PropModeReplace, (unsigned char*)vals, 3);
             const Atom type = XInternAtom(_dpy, "_NET_WM_WINDOW_TYPE", False);
-            // 类型用 DOCK，不用 UTILITY：桌宠是"桌面挂件"，要的是**按显示桌面（Super+D）时也留在桌面上**。
-            // WM 不会最小化 dock 类窗口（GNOME/Mutter 上 Ubuntu 的 Dock 就是这么活下来的），而 UTILITY
-            // 会被一起最小化——只剩 override-redirect 的气泡孤零零挂在桌面上（实测到的现象）。
-            // 代价：dock 在多数 WM 里总是置顶、跟随所有工作区，"总在最前"开关在 GNOME 上不再有区别。
-            Atom dock = XInternAtom(_dpy, "_NET_WM_WINDOW_TYPE_DOCK", False);
-            XChangeProperty(_dpy, _win, type, XA_ATOM, 32, PropModeReplace, (unsigned char*)&dock, 1);
+            // UTILITY 允许窗口管理器按置顶开关管理模型及其 transient 气泡。
+            Atom utility = XInternAtom(_dpy, "_NET_WM_WINDOW_TYPE_UTILITY", False);
+            XChangeProperty(_dpy, _win, type, XA_ATOM, 32, PropModeReplace, (unsigned char*)&utility, 1);
         }
         {
             XSizeHints sh;
@@ -418,6 +415,7 @@ public:
         img.red_mask = 0xff0000;
         img.green_mask = 0xff00;
         img.blue_mask = 0xff;
+        const uint32_t* modelPixels = src;
         if (!_fxv.empty())
         {
             src = FxComposite(src);   // 有特效：拷一份再叠画（不动渲染器缓冲）
@@ -426,7 +424,7 @@ public:
         XPutImage(_dpy, _win, _gc, &img, 0, 0, 0, 0, (unsigned)_w, (unsigned)_h);
         if (--_shapeCountdown <= 0 && !_pressed)   // 输入区域跟角色轮廓（~0.5s 一次；拖动中不改）
         {
-            UpdateInputShape(src);
+            UpdateInputShape(modelPixels);
             _shapeCountdown = 15;
         }
         UpdateBubble();
@@ -738,7 +736,7 @@ public:
         return false;
     }
 
-    /** 气泡窗口：override-redirect 的 ARGB 小窗（不进窗口管理、不抢焦点），按需映射 */
+    /** 气泡窗口：由 WM 管理的 ARGB transient 小窗，与模型一起升降。 */
     bool EnsureBubbleWindow()
     {
         if (_bw != 0)
@@ -750,11 +748,31 @@ public:
         swa.colormap = _cmap;
         swa.background_pixel = 0;
         swa.border_pixel = 0;
-        swa.override_redirect = True;
+        swa.override_redirect = False;
         swa.event_mask = ButtonPressMask | PointerMotionMask | LeaveWindowMask | ExposureMask;
         _bw = XCreateWindow(_dpy, RootWindow(_dpy, DefaultScreen(_dpy)), 0, 0, 16, 16, 0, 32, InputOutput, _vis,
                             CWColormap | CWBackPixel | CWBorderPixel | CWOverrideRedirect | CWEventMask, &swa);
+        if (_bw == 0) return false;
         XStoreName(_dpy, _bw, "l2dpet-bubble");   // 便于测试/工具定位
+        XSetTransientForHint(_dpy, _bw, _win);
+        XWMHints hints;
+        memset(&hints, 0, sizeof(hints));
+        hints.flags = InputHint;
+        hints.input = False;
+        XSetWMHints(_dpy, _bw, &hints);
+        struct { unsigned long flags, functions, decorations; long inputMode; unsigned long status; } motif;
+        memset(&motif, 0, sizeof(motif));
+        motif.flags = 2;
+        const Atom mwm = XInternAtom(_dpy, "_MOTIF_WM_HINTS", False);
+        XChangeProperty(_dpy, _bw, mwm, mwm, 32, PropModeReplace, (unsigned char*)&motif, 5);
+        const Atom utility = XInternAtom(_dpy, "_NET_WM_WINDOW_TYPE_UTILITY", False);
+        XChangeProperty(_dpy, _bw, XInternAtom(_dpy, "_NET_WM_WINDOW_TYPE", False), XA_ATOM, 32,
+                        PropModeReplace, (unsigned char*)&utility, 1);
+        Atom states[3] = { XInternAtom(_dpy, "_NET_WM_STATE_SKIP_TASKBAR", False),
+                           XInternAtom(_dpy, "_NET_WM_STATE_SKIP_PAGER", False),
+                           XInternAtom(_dpy, "_NET_WM_STATE_ABOVE", False) };
+        XChangeProperty(_dpy, _bw, XInternAtom(_dpy, "_NET_WM_STATE", False), XA_ATOM, 32,
+                        PropModeReplace, (unsigned char*)states, _cfgTop ? 3 : 2);
         _bgc = XCreateGC(_dpy, _bw, 0, NULL);
         _bxft = XftDrawCreate(_dpy, _bw, _vis, _cmap);
         return _bw != 0;
@@ -1122,6 +1140,14 @@ public:
         y = std::max(0, std::min(y, shh - _bwH));
         if (!_bwMapped)
         {
+            XSizeHints hints;
+            memset(&hints, 0, sizeof(hints));
+            hints.flags = USPosition | PPosition | PSize;
+            hints.x = x;
+            hints.y = y;
+            hints.width = _bwW;
+            hints.height = _bwH;
+            XSetWMNormalHints(_dpy, _bw, &hints);
             XMoveResizeWindow(_dpy, _bw, x, y, (unsigned)_bwW, (unsigned)_bwH);
             XMapRaised(_dpy, _bw);
             _bwMapped = true;
@@ -1651,10 +1677,23 @@ private:
             ev.xclient.data.l[3] = 1;
             XSendEvent(_dpy, RootWindow(_dpy, DefaultScreen(_dpy)), False, SubstructureRedirectMask | SubstructureNotifyMask,
                        &ev);
+            if (_bw != 0)
+            {
+                ev.xclient.window = _bw;
+                XSendEvent(_dpy, RootWindow(_dpy, DefaultScreen(_dpy)), False,
+                           SubstructureRedirectMask | SubstructureNotifyMask, &ev);
+            }
+            fprintf(stderr, "[port:pet] top=%d (model+bubble)\n", top);
         }
         if ((pass ? 1 : 0) != _appliedPass)
         {
+            if (_dragging) SavePlacement();
+            _pressed = false;
+            _dragging = false;
+            if (pass) XUngrabPointer(_dpy, CurrentTime);
             _appliedPass = pass ? 1 : 0;
+            if (pass) XShapeCombineRectangles(_dpy, _win, ShapeInput, 0, 0, NULL, 0, ShapeSet, Unsorted);
+            fprintf(stderr, "[port:pet] model passthrough=%d\n", _appliedPass);
             _shapeCountdown = 0;   // 下一帧重算输入区域
         }
         XFlush(_dpy);
@@ -1677,6 +1716,7 @@ private:
             switch (e.type)
             {
             case ButtonPress:
+                if (e.xbutton.window != _win || _appliedPass == 1) break;
                 if (e.xbutton.button == Button1)
                 {
                     _uiEvents.push_back("{\"event\":\"ui_close_menu\"}");   // 在她身上左键 = 收起菜单（兜底）
@@ -1703,7 +1743,7 @@ private:
                 }
                 break;
             case MotionNotify:
-                if (_pressed && !_cfgLock)   // 锁定大小和位置：拖动不生效（按下抬起仍算一次点击）
+                if (_pressed && !_cfgLock && _appliedPass != 1)   // 锁定大小和位置：拖动不生效（按下抬起仍算一次点击）
                 {
                     const int dx = e.xmotion.x_root - _pressRootX, dy = e.xmotion.y_root - _pressRootY;
                     if (!_dragging && dx * dx + dy * dy > 25)
@@ -1754,12 +1794,13 @@ private:
             case ConfigureNotify:
                 if (e.xconfigure.window == _win)
                 {
-                    _winX = e.xconfigure.x;
-                    _winY = e.xconfigure.y;
+                    Window child = 0;
+                    XTranslateCoordinates(_dpy, _win, RootWindow(_dpy, DefaultScreen(_dpy)),
+                                          0, 0, &_winX, &_winY, &child);
                 }
                 break;
             // 窗口在不在屏幕上：WM 最小化/显示桌面会 Unmap 我们（客户端自己 hide 也走同一条），
-            // 记下来给气泡用（气泡是 override-redirect 窗口，WM 不会连它一起收）
+            // 记下来给气泡用，隐藏模型时也隐藏气泡。
             case MapNotify:
                 if (e.xmap.window == _win) _winMapped = true;
                 break;
