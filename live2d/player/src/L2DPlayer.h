@@ -13,6 +13,7 @@
 #pragma once
 
 #include "SysStats.h"
+#include "PetLifeBalance.h"
 #include "FileUtil.h"
 #include "ModelImport.h"
 #include "Backup.h"
@@ -2615,8 +2616,7 @@ public:
     void AffectionUp(csmFloat32 g)
     {
         // 高处递减（≥0.375 起逐渐变小），低处不放大；关系冷淡（< 0.25）时信任要慢慢重建：再减半
-        const csmFloat32 k = std::min(1.0f, (1.0f - _lifeAffection) * 1.6f) * (_lifeAffection < 0.25f ? 0.5f : 1.0f);
-        _lifeAffection = Clamp01(_lifeAffection + g * k);
+        _lifeAffection = Clamp01(_lifeAffection + petlife::AffectionGain(_lifeAffection, g));
     }
     static const char* LifeStateZh(int st)
     {
@@ -2667,21 +2667,21 @@ public:
     /** 一次互动的代价：先扣精力；如果她**已经累了**（扣之前就 < kTiredEnergy），这次互动还要
      *  掉亲密度（不走边际递减，线性 -0.02）、涨一点恼火，并抱怨一句（8 秒内最多一句）。
      *  返回 true = 她累了（调用方据此不再做正常的开心反应） */
-    bool InteractCost(csmFloat32 cost, const char* what)
+    bool InteractCost(csmFloat32 cost, const char* what, bool gentle = false, bool rude = false)
     {
         if (cost > 0.0f)
         {
-            // 短时间连续玩耍叠加：4 秒内接着玩算连击，每一多下 +25%，最多翻倍（别叠加太高）；
+            // 短时间连续玩耍叠加：4 秒内接着玩算连击，每一多下 +25%，普通玩耍最多翻倍，温柔抚摸最多 1.25 倍；
             // 停手超过 4 秒就清零，慢慢陪她玩不受影响
             _playCombo = (_perfClock - _playComboAt <= 4.0f) ? _playCombo + 1 : 1;
             _playComboAt = _perfClock;
-            cost *= std::min(1.0f + 0.25f * (csmFloat32)(_playCombo - 1), 2.0f);
+            cost *= petlife::PlayMultiplier(_playCombo, gentle);
         }
         const bool tired = _lifeEnergy < kTiredEnergy;
         _lifeEnergy = Clamp01(_lifeEnergy - cost);
         if (!tired) return false;
         _lifeAffection = Clamp01(_lifeAffection - 0.02f);
-        _lifeAnnoy = Clamp01(_lifeAnnoy + 0.06f);
+        _lifeAnnoy = Clamp01(_lifeAnnoy + _irritation.Add(_perfClock, rude ? 0.16f : 0.06f, rude, _lifeAffection));
         EmotionNudge("tired", 0.7f);
         // 累了还被闹到恼火 70% → 生气不理人（之后亲密度不再往下掉——她已经背过身去了）
         if (_lifeState == LS_AWAKE && _lifeAnnoy >= 0.7f)
@@ -3505,6 +3505,7 @@ private:
     csmFloat32 _userIdleT = 0.0f, _sinceTouchT = 0.0f, _lastPx = -1.0f, _lastPy = -1.0f;
     csmFloat32 _workT = 0.0f;
     csmFloat32 _tiredSayAt = -100.0f;   // 上次"好累"抱怨（防刷屏）
+    petlife::Irritation _irritation; // Recent unwanted interactions, across zones and touch kinds.
     int _playCombo = 0;                 // 连续玩耍的连击数（4 秒内接着玩才叠加，见 InteractCost）
     csmFloat32 _playComboAt = -100.0f;  // 上一次花钱的互动时刻
     // ---- 状态页反馈数据（panel_state.life）：动态流 / 情绪曲线 / 部位分布 / 猜拳战绩 / 相识日

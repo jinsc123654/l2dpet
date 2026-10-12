@@ -93,6 +93,23 @@ class PackagingTests(unittest.TestCase):
                 time.sleep(0.1)
             self.assertEqual(self.captured()[0], "0")
 
+    def test_autostart_xdg_directory_and_desktop_group(self):
+        import configparser
+        config = self.base / "custom config"
+        env = dict(self.env, XDG_CONFIG_HOME=str(config))
+        entry = config / "autostart/l2dpet.desktop"
+        self.run_cmd("sh", str(self.pkg / "l2dpet"), "autostart", "on", env=env)
+        parser = configparser.ConfigParser(interpolation=None)
+        parser.read(entry)
+        self.assertEqual(parser["Desktop Entry"]["X-GNOME-Autostart-enabled"], "true")
+        self.assertEqual(parser["Desktop Entry"]["Type"], "Application")
+        self.assertFalse((self.home / ".config/autostart/l2dpet.desktop").exists())
+        self.run_cmd("sh", str(self.pkg / "l2dpet"), "autostart", "off", env=env)
+        self.assertFalse(entry.exists())
+        env["XDG_CONFIG_HOME"] = "invalid-relative"
+        self.run_cmd("sh", str(self.pkg / "l2dpet"), "autostart", "on", env=env)
+        self.assertTrue((self.home / ".config/autostart/l2dpet.desktop").exists())
+
     def test_install_copy_failure_never_reports_success(self):
         fakebin = self.base / "fakebin"
         fakebin.mkdir()

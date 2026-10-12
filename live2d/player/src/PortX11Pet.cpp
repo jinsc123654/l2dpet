@@ -155,9 +155,9 @@ public:
                              XInternAtom(_dpy, "_NET_WM_STATE_SKIP_PAGER", False) };
             XChangeProperty(_dpy, _win, state, XA_ATOM, 32, PropModeReplace, (unsigned char*)vals, 3);
             const Atom type = XInternAtom(_dpy, "_NET_WM_WINDOW_TYPE", False);
-            // UTILITY 允许窗口管理器按置顶开关管理模型及其 transient 气泡。
-            Atom utility = XInternAtom(_dpy, "_NET_WM_WINDOW_TYPE_UTILITY", False);
-            XChangeProperty(_dpy, _win, type, XA_ATOM, 32, PropModeReplace, (unsigned char*)&utility, 1);
+            // NORMAL 让普通层叠顺序只由 ABOVE 开关控制；部分 WM 会额外抬高 UTILITY。
+            Atom normal = XInternAtom(_dpy, "_NET_WM_WINDOW_TYPE_NORMAL", False);
+            XChangeProperty(_dpy, _win, type, XA_ATOM, 32, PropModeReplace, (unsigned char*)&normal, 1);
         }
         {
             XSizeHints sh;
@@ -525,6 +525,16 @@ public:
         return std::max(lowest, std::min(pos, highest));
     }
 
+    // WM 在取消映射时可清掉 _NET_WM_STATE；每次显示前恢复当前配置。
+    void PrepareWindowState(Window window)
+    {
+        Atom states[3] = { XInternAtom(_dpy, "_NET_WM_STATE_SKIP_TASKBAR", False),
+                           XInternAtom(_dpy, "_NET_WM_STATE_SKIP_PAGER", False),
+                           XInternAtom(_dpy, "_NET_WM_STATE_ABOVE", False) };
+        XChangeProperty(_dpy, window, XInternAtom(_dpy, "_NET_WM_STATE", False), XA_ATOM, 32,
+                        PropModeReplace, (unsigned char*)states, _cfgTop ? 3 : 2);
+    }
+
     /** 第一次显示：存档位置 / 没存过 → 贴工作区左下角；尺寸此时已是最终尺寸。
      *  存档位置按"拖动允许的规则"恢复（可以伸出屏幕，只保证留一块抓得到），
      *  不按旧行为夹进工作区——否则运行时故意挂在屏幕边上的她会'重启后自己跳回全身可见' */
@@ -553,6 +563,7 @@ public:
         hints.width = _w;
         hints.height = _h;
         XSetWMNormalHints(_dpy, _win, &hints);
+        PrepareWindowState(_win);
         XMapWindow(_dpy, _win);
         XMoveWindow(_dpy, _win, _winX, _winY);
         _shapeCountdown = 0;
@@ -765,9 +776,9 @@ public:
         motif.flags = 2;
         const Atom mwm = XInternAtom(_dpy, "_MOTIF_WM_HINTS", False);
         XChangeProperty(_dpy, _bw, mwm, mwm, 32, PropModeReplace, (unsigned char*)&motif, 5);
-        const Atom utility = XInternAtom(_dpy, "_NET_WM_WINDOW_TYPE_UTILITY", False);
+        const Atom normal = XInternAtom(_dpy, "_NET_WM_WINDOW_TYPE_NORMAL", False);
         XChangeProperty(_dpy, _bw, XInternAtom(_dpy, "_NET_WM_WINDOW_TYPE", False), XA_ATOM, 32,
-                        PropModeReplace, (unsigned char*)&utility, 1);
+                        PropModeReplace, (unsigned char*)&normal, 1);
         Atom states[3] = { XInternAtom(_dpy, "_NET_WM_STATE_SKIP_TASKBAR", False),
                            XInternAtom(_dpy, "_NET_WM_STATE_SKIP_PAGER", False),
                            XInternAtom(_dpy, "_NET_WM_STATE_ABOVE", False) };
@@ -1149,7 +1160,9 @@ public:
             hints.height = _bwH;
             XSetWMNormalHints(_dpy, _bw, &hints);
             XMoveResizeWindow(_dpy, _bw, x, y, (unsigned)_bwW, (unsigned)_bwH);
-            XMapRaised(_dpy, _bw);
+            PrepareWindowState(_bw);
+            if (_cfgTop) XMapRaised(_dpy, _bw);
+            else XMapWindow(_dpy, _bw);
             _bwMapped = true;
             _bwX = x;
             _bwY = y;
@@ -1411,6 +1424,7 @@ public:
             if (lockNow != _cfgLock)
             {
                 _cfgLock = lockNow;
+                if (lockNow) FinishWindowManagerDrag();
                 _dragging = false;   // 锁定瞬间中止进行中的拖动
             }
             ApplyWindowConfig();
@@ -1462,6 +1476,7 @@ public:
         _hidden = !v;
         if (_hidden)
         {
+            FinishWindowManagerDrag();
             HideBubble();
             _bubActive = false;   // Present 隐藏时不再跑：气泡立即取消映射，别留在屏幕上
             if (_bw != 0 && _bwMapped)
@@ -1478,6 +1493,7 @@ public:
         }
         else
         {
+            PrepareWindowState(_win);
             XMapWindow(_dpy, _win);
             XMoveWindow(_dpy, _win, _winX, _winY);
             _appliedTop = -1;   // 重新映射后置顶状态要再发一次
@@ -1687,6 +1703,7 @@ private:
         }
         if ((pass ? 1 : 0) != _appliedPass)
         {
+            FinishWindowManagerDrag();
             if (_dragging) SavePlacement();
             _pressed = false;
             _dragging = false;
@@ -1696,6 +1713,66 @@ private:
             fprintf(stderr, "[port:pet] model passthrough=%d\n", _appliedPass);
             _shapeCountdown = 0;   // 下一帧重算输入区域
         }
+        XFlush(_dpy);
+    }
+
+    bool BeginWindowManagerDrag(const XMotionEvent& motion)
+    {
+        const Window root = RootWindow(_dpy, DefaultScreen(_dpy));
+        const Atom move = XInternAtom(_dpy, "_NET_WM_MOVERESIZE", False);
+        Atom type = None;
+        int format = 0;
+        unsigned long count = 0, after = 0;
+        unsigned char* data = NULL;
+        bool supported = false;
+        if (XGetWindowProperty(_dpy, root, XInternAtom(_dpy, "_NET_SUPPORTED", False),
+                               0, 4096, False, XA_ATOM, &type, &format, &count, &after, &data) == Success
+            && type == XA_ATOM && format == 32 && data != NULL)
+        {
+            const Atom* atoms = (const Atom*)data;
+            for (unsigned long n = 0; n < count; ++n) if (atoms[n] == move) supported = true;
+        }
+        if (data != NULL) XFree(data);
+        if (!supported) return false;
+        XEvent event;
+        memset(&event, 0, sizeof(event));
+        event.xclient.type = ClientMessage;
+        event.xclient.window = _win;
+        event.xclient.message_type = move;
+        event.xclient.format = 32;
+        event.xclient.data.l[0] = motion.x_root;
+        event.xclient.data.l[1] = motion.y_root;
+        event.xclient.data.l[2] = 8; // _NET_WM_MOVERESIZE_MOVE
+        event.xclient.data.l[3] = Button1;
+        event.xclient.data.l[4] = 1; // application
+        // Release X11's implicit button grab so the WM can own the user drag.
+        XUngrabPointer(_dpy, motion.time);
+        const bool sent = XSendEvent(_dpy, root, False,
+                                    SubstructureRedirectMask | SubstructureNotifyMask, &event) != 0;
+        XFlush(_dpy);
+        return sent;
+    }
+
+    void FinishWindowManagerDrag()
+    {
+        if (!_wmDragging) return;
+        XEvent event;
+        memset(&event, 0, sizeof(event));
+        event.xclient.type = ClientMessage;
+        event.xclient.window = _win;
+        event.xclient.message_type = XInternAtom(_dpy, "_NET_WM_MOVERESIZE", False);
+        event.xclient.format = 32;
+        event.xclient.data.l[2] = 11; // CANCEL also covers release before the WM acquired its grab.
+        event.xclient.data.l[4] = 1;
+        XSendEvent(_dpy, RootWindow(_dpy, DefaultScreen(_dpy)), False,
+                   SubstructureRedirectMask | SubstructureNotifyMask, &event);
+        _wmDragging = false;
+        _pressed = false;
+        _dragging = false;
+        Window child = None;
+        XTranslateCoordinates(_dpy, _win, RootWindow(_dpy, DefaultScreen(_dpy)),
+                              0, 0, &_winX, &_winY, &child);
+        SavePlacement();
         XFlush(_dpy);
     }
 
@@ -1750,8 +1827,11 @@ private:
                     {
                         _dragging = true;
                         _movedByUser = true;   // 用户自己挪的：之后不再按存档位置搬她
+                        // NORMAL 窗口的 XMoveWindow 是程序移动，WM 会把它夹回工作区。
+                        // 原生拖动协议让 WM 按用户操作处理，允许角色伸出屏幕。
+                        _wmDragging = BeginWindowManagerDrag(e.xmotion);
                     }
-                    if (_dragging)
+                    if (_dragging && !_wmDragging)
                     {
                         _winX = _pressWinX + dx;
                         _winY = _pressWinY + dy;
@@ -1778,6 +1858,7 @@ private:
             case ButtonRelease:
                 if (e.xbutton.button == Button1 && _pressed)
                 {
+                    if (_wmDragging) { FinishWindowManagerDrag(); break; }
                     _pressed = false;
                     if (!_dragging)
                     {
@@ -1824,6 +1905,15 @@ private:
             default:
                 break;
             }
+        }
+        // WM owns the release event during native dragging; poll only while that drag is active.
+        if (_wmDragging)
+        {
+            Window root = None, child = None;
+            int rx = 0, ry = 0, wx = 0, wy = 0;
+            unsigned int mask = 0;
+            if (XQueryPointer(_dpy, _win, &root, &child, &rx, &ry, &wx, &wy, &mask)
+                && !(mask & Button1Mask)) FinishWindowManagerDrag();
         }
     }
 
@@ -1956,7 +2046,7 @@ private:
     int _w = 360, _h = 600;
     long _frameNs = 0;
     struct timespec _nextFrame;
-    bool _pressed = false, _dragging = false;
+    bool _pressed = false, _dragging = false, _wmDragging = false;
     int _pressRootX = 0, _pressRootY = 0, _pressWinX = 0, _pressWinY = 0;
     int _winX = 0, _winY = 0;
     bool _clickPending = false;

@@ -305,6 +305,7 @@ bool L2DPlayer::LifeTouch(int z, int kind, int n, csmFloat32 x, csmFloat32 y)
     {
         return false;
     }
+    (void)n; // Annoyance streaks use time across all zones, rather than the per-zone click count.
     const bool gentleZone = (z == Z_HEAD || z == Z_FACE || z == Z_HAND_L || z == Z_HAND_R);
     const bool rudeZone = (z == Z_CHEST || z == Z_CROTCH);
 
@@ -389,6 +390,7 @@ bool L2DPlayer::LifeTouch(int z, int kind, int n, csmFloat32 x, csmFloat32 y)
     {
         if (kind == 1 && gentleZone)
         {
+            _irritation.Soothe();
             _lifeAnnoy = Clamp01(_lifeAnnoy - 0.18f);
             if (_lifeAnnoy < 0.3f)
             {
@@ -406,7 +408,7 @@ bool L2DPlayer::LifeTouch(int z, int kind, int n, csmFloat32 x, csmFloat32 y)
             }
             return true;
         }
-        _lifeAnnoy = Clamp01(_lifeAnnoy + 0.1f);
+        _lifeAnnoy = Clamp01(_lifeAnnoy + _irritation.Add(_perfClock, 0.1f, rudeZone, _lifeAffection));
         StartGesture("shake", 1.2f, 1, 0.6f);
         if (_perfClock - _lastReactLineAt > 2.0f)
         {
@@ -414,8 +416,10 @@ bool L2DPlayer::LifeTouch(int z, int kind, int n, csmFloat32 x, csmFloat32 y)
         }
         return true;
     }
-    // ---- 醒着：每次互动都消耗精力（戳 0.015、摸 0.01）；累了还继续 → 掉亲密度、不做开心反应
-    if (InteractCost(kind == 1 ? 0.01f : 0.015f, TouchVerb(ZoneKey(z), kind == 1)))
+    // ---- 醒着：每次互动都消耗精力（戳 0.015、温柔抚摸 0.008、其它搓揉 0.01）；累了还继续 → 掉亲密度、不做开心反应
+    const bool gentleTouch = kind == 1 && gentleZone;
+    if (InteractCost(gentleTouch ? petlife::kGentleTouchCost : (kind == 1 ? 0.01f : 0.015f),
+                     TouchVerb(ZoneKey(z), kind == 1), gentleTouch, rudeZone))
     {
         StartGesture("shake", 0.9f, 1, 0.4f);
         return true;
@@ -423,7 +427,8 @@ bool L2DPlayer::LifeTouch(int z, int kind, int n, csmFloat32 x, csmFloat32 y)
     // ---- 醒着：先记账，再看要不要进别的状态
     if (kind == 1 && gentleZone)
     {
-        AffectionUp(0.015f);
+        AffectionUp(petlife::kGentleAffectionGain);
+        _irritation.Soothe();
         _lifeAnnoy = Clamp01(_lifeAnnoy - 0.08f);
         // 持续抚摸：第一下是正常反应，之后进入"享受"——眯眼、嘴角上扬、往手那边蹭，不再每次重播动作
         if (_perfClock < _enjoyUntil + 1.5f)
@@ -443,13 +448,10 @@ bool L2DPlayer::LifeTouch(int z, int kind, int n, csmFloat32 x, csmFloat32 y)
         _enjoyUntil = _perfClock + 2.5f;
         return false;   // 第一下：默认区域反应
     }
-    if (kind == 0)
+    if (kind == 0 || rudeZone)
     {
-        csmFloat32 a = rudeZone ? 0.22f : 0.04f;
-
-        if (n >= 3) a += 0.12f * (csmFloat32)(n - 2);
-        if (_lifeAffection > 0.7f && !rudeZone) a *= 0.5f;   // 关系好，容忍度高
-        _lifeAnnoy = Clamp01(_lifeAnnoy + a);
+        const csmFloat32 base = rudeZone ? (kind == 1 ? 0.14f : 0.22f) : 0.06f;
+        _lifeAnnoy = Clamp01(_lifeAnnoy + _irritation.Add(_perfClock, base, rudeZone, _lifeAffection));
         if (rudeZone) _lifeAffection = Clamp01(_lifeAffection - 0.01f);
         if (z == Z_HAND_L || z == Z_HAND_R) AffectionUp(0.01f);
         if (_lifeAnnoy >= 0.7f)
@@ -535,9 +537,10 @@ void L2DPlayer::PetLifeTick(csmFloat32 dt, bool rawHas, csmFloat32 px, csmFloat3
         _lifeEnergy = _lifeEnergy < kAwakeEnergyCeil ? Clamp01(_lifeEnergy + drift)
                                                     : Clamp01(_lifeEnergy - drift);
     }
-    _lifeAnnoy = Clamp01(_lifeAnnoy - dt / (_lifeState == LS_SULK ? 90.0f : 35.0f));
-    // 寂寞：被晾着约 20 分钟才满（原来 2.5 分钟就满——几乎永远 100）
-    if (_sinceTouchT > 45.0f && _lifeState == LS_AWAKE) _lifeLonely = Clamp01(_lifeLonely + dt / 1200.0f);
+    _lifeAnnoy = Clamp01(_lifeAnnoy - _irritation.Decay(_perfClock, dt, _lifeState == LS_SULK));
+    // 寂寞从初始 20% 到搭话门槛 60% 约 3 分钟；人离开则仍按睡眠节律休息。
+    if (_sinceTouchT > 45.0f && _lifeState == LS_AWAKE)
+        _lifeLonely = Clamp01(_lifeLonely + dt / petlife::kLonelyFullSeconds);
     if (_cfgDirtyAt >= 0.0f && _perfClock - _cfgDirtyAt > 1.0f)
     {
         _cfgDirtyAt = -1.0f;

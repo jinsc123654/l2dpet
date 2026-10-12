@@ -648,8 +648,8 @@ bool PortGlfwPet::Initialize(const PortConfig& cfg)
         if (dpy != NULL && xw != 0)
         {
             const Atom type = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE", False);
-            const Atom utility = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_UTILITY", False);
-            XChangeProperty(dpy, xw, type, XA_ATOM, 32, PropModeReplace, (unsigned char*)&utility, 1);
+            const Atom normal = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_NORMAL", False);
+            XChangeProperty(dpy, xw, type, XA_ATOM, 32, PropModeReplace, (unsigned char*)&normal, 1);
             const Atom state = XInternAtom(dpy, "_NET_WM_STATE", False);
             Atom states[3] = { XInternAtom(dpy, "_NET_WM_STATE_SKIP_TASKBAR", False),
                                XInternAtom(dpy, "_NET_WM_STATE_SKIP_PAGER", False),
@@ -1608,8 +1608,8 @@ bool PortGlfwPet::EnsureBubbleWindow(int w, int h)
         if (dpy != NULL && xw != 0)
         {
             const Atom type = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE", False);
-            const Atom utility = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_UTILITY", False);
-            XChangeProperty(dpy, xw, type, XA_ATOM, 32, PropModeReplace, (unsigned char*)&utility, 1);
+            const Atom normal = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_NORMAL", False);
+            XChangeProperty(dpy, xw, type, XA_ATOM, 32, PropModeReplace, (unsigned char*)&normal, 1);
             XSetTransientForHint(dpy, xw, glfwGetX11Window(_win));
             const Atom state = XInternAtom(dpy, "_NET_WM_STATE", False);
             Atom states[3] = { XInternAtom(dpy, "_NET_WM_STATE_SKIP_TASKBAR", False),

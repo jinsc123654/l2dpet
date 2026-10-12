@@ -92,7 +92,7 @@ endif()
 
 add_subdirectory("${EUI_NEO_DIR}" eui-neo)
 
-set(L2D_PANEL_SOURCES app.cpp petlink.cpp i18n.cpp ../player/src/Platform.cpp)
+set(L2D_PANEL_SOURCES app.cpp DesktopStartup.cpp petlink.cpp i18n.cpp ../player/src/Platform.cpp)
 
 # 程序版本（仓库根 version.txt，形如 {a-1.0.0}）：关于页要显示。文件不在就给 dev。
 set(L2D_VERSION "dev")

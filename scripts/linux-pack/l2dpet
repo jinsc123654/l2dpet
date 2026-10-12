@@ -472,7 +472,10 @@ cmd_dock() {            # GNOME 收藏夹（其它桌面环境打印手动固定
 }
 
 cmd_autostart() {       # 登录自启 on/off
-    AD=$HOME/.config/autostart
+    case ${XDG_CONFIG_HOME:-} in
+        /*) AD=$XDG_CONFIG_HOME/autostart ;;
+        *) AD=$HOME/.config/autostart ;;
+    esac
     ENTRY=$AD/l2dpet.desktop
     case ${1:-on} in
         off)
@@ -480,8 +483,8 @@ cmd_autostart() {       # 登录自启 on/off
             ;;
         on)
             mkdir -p "$AD"
-            { printf 'X-GNOME-Autostart-enabled=true\n'
-              write_desktop_file /dev/stdout "$(self_exec)" "$INST_PREFIX/l2dpet.png"; } >"$ENTRY"
+            write_desktop_file "$ENTRY" "$(self_exec)" "$INST_PREFIX/l2dpet.png" || return 1
+            printf 'X-GNOME-Autostart-enabled=true\n' >>"$ENTRY" || return 1
             say "登录自启已开 → $ENTRY（不想要就删掉它，或 l2dpet autostart off）"
             ;;
         *) say "用法：l2dpet autostart on|off"; return 2 ;;
@@ -602,7 +605,11 @@ cmd_uninstall() {
     DESK=$(xdg-user-dir DESKTOP 2>/dev/null || true)
     if [ -z "$DESK" ] || [ "$DESK" = "$HOME" ]; then DESK=$HOME/Desktop; fi
     [ -f "$DESK/l2dpet.desktop" ] && rm -f "$DESK/l2dpet.desktop" && say "已删除桌面图标"
-    rm -f "$HOME/.config/autostart/l2dpet.desktop" 2>/dev/null || true
+    case ${XDG_CONFIG_HOME:-} in
+        /*) startup_config=$XDG_CONFIG_HOME ;;
+        *) startup_config=$HOME/.config ;;
+    esac
+    rm -f "$startup_config/autostart/l2dpet.desktop" 2>/dev/null || true
     if command -v gsettings >/dev/null 2>&1 && gsettings get org.gnome.shell favorite-apps >/dev/null 2>&1; then
         cur=$(gsettings get org.gnome.shell favorite-apps)
         case $cur in

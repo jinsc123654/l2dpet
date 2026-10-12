@@ -128,7 +128,11 @@ rm -rf -- "$PREFIX"
 say "[uninstall] 删除启动器/菜单项/图标"
 [ -L "$BINDIR/l2dpet" ] && rm -f "$BINDIR/l2dpet"
 rm -f "$APPDIR/l2dpet.desktop" "$ICONROOT/128x128/apps/l2dpet.png" 2>/dev/null || true
-rm -f "$HOME/.config/autostart/l2dpet.desktop" 2>/dev/null || true
+case ${XDG_CONFIG_HOME:-} in
+    /*) startup_config=$XDG_CONFIG_HOME ;;
+    *) startup_config=$HOME/.config ;;
+esac
+rm -f "$startup_config/autostart/l2dpet.desktop" 2>/dev/null || true
 # 桌面图标（--desktop-icon 装的；用户可能改过名，只删我们自己那个名字）
 DESK=$(xdg-user-dir DESKTOP 2>/dev/null || true)
 [ -n "$DESK" ] && [ "$DESK" != "$HOME" ] || DESK=$HOME/Desktop
