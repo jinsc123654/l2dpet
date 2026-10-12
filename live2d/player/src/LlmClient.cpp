@@ -6,6 +6,7 @@
 #include "LlmClient.h"
 #include "JsonLite.h"
 #include "Platform.h"
+#include "PetWeather.h"   // 直连天气源的解析/校验（纯函数）；见 OpenMeteoWeather
 
 #include <cstdio>
 #include <cstring>
@@ -605,6 +606,162 @@ LlmTokenStats LlmGetTokenStats()
 {
     std::lock_guard<std::mutex> lk(g_statusMu);
     return g_tokens;
+}
+
+namespace {
+/** 城市名只作为查询参数：百分号编码后接入，只留 RFC3986 的 unreserved */
+std::string EncodeQueryValue(const std::string& text)
+{
+    const char* hex = "0123456789ABCDEF";
+    std::string out;
+    for (unsigned char c : text)
+    {
+        const bool keep = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+            || c == '-' || c == '.' || c == '_' || c == '~';
+        if (keep) out += (char)c;
+        else
+        {
+            out += '%';
+            out += hex[c >> 4];
+            out += hex[c & 15];
+        }
+    }
+    return out;
+}
+/** 直连天气源的两个固定地址（主机与路径写死在函数里；城市名编码后作查询参数，坐标是数字） */
+std::string WeatherGeocodeUrl(const std::string& location)
+{
+    std::string url = "https://geocoding-api.open-meteo.com/v1/search?name=";
+    url += EncodeQueryValue(location);
+    url += "&count=1&language=zh&format=json";
+    return url;
+}
+std::string WeatherForecastUrl(double lat, double lon)
+{
+    std::string url = "https://api.open-meteo.com/v1/forecast?latitude=";
+    url += std::to_string(lat);
+    url += "&longitude=";
+    url += std::to_string(lon);
+    url += "&current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,"
+           "wind_speed_10m,precipitation"
+           "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max"
+           "&timezone=auto&forecast_days=2";
+    return url;
+}
+}   // namespace
+
+bool OpenMeteoWeather(const std::string& location, std::string* facts, std::string* err)
+{
+    facts->clear();
+    if (location.empty())
+    {
+        *err = "还没设置天气城市";
+        return false;
+    }
+#if !defined(L2D_WITH_CURL)
+    *err = "此构建未编入 libcurl，无法直连天气源";
+    return false;
+#else
+    std::string geoJson;
+    const std::string geoUrl = WeatherGeocodeUrl(location);
+    if (!HttpGet(geoUrl, &geoJson, err)) return false;
+    double lat = 0.0, lon = 0.0;
+    std::string display;
+    if (!PetWeather::OpenMeteoPlace(geoJson, &lat, &lon, &display, err)) return false;
+    std::string forecastJson;
+    const std::string forecastUrl = WeatherForecastUrl(lat, lon);
+    if (!HttpGet(forecastUrl, &forecastJson, err)) return false;
+    return PetWeather::ParseOpenMeteo(geoJson, forecastJson, facts, err);
+#endif
+}
+
+bool HttpGet(const std::string& url, std::string* body, std::string* err, long timeoutSec)
+{
+    body->clear();
+#if !defined(L2D_WITH_CURL)
+    (void)url;
+    (void)timeoutSec;
+    *err = "此构建未编入 libcurl，无法联网取数据";
+    return false;
+#else
+    // 只取 scheme/host/port 做公网校验（path 里带查询串没关系，查询串由调用方编码好）
+    const size_t sep = url.find("://");
+    if (sep == std::string::npos)
+    {
+        *err = "地址缺少 scheme（http:// 或 https://）";
+        return false;
+    }
+    Endpoint ep;
+    ep.scheme = url.substr(0, sep);
+    if (ep.scheme != "http" && ep.scheme != "https")
+    {
+        *err = "只允许 http/https 地址";
+        return false;
+    }
+    std::string rest = url.substr(sep + 3);
+    const size_t cut = rest.find_first_of("/?");
+    const std::string hostport = cut == std::string::npos ? rest : rest.substr(0, cut);
+    if (hostport.empty())
+    {
+        *err = "地址缺少主机名";
+        return false;
+    }
+    ep.port = ep.scheme == "https" ? 443 : 80;
+    const size_t colon = hostport.rfind(':');
+    if (colon != std::string::npos)
+    {
+        ep.port = atoi(hostport.substr(colon + 1).c_str());
+        if (ep.port <= 0 || ep.port > 65535)
+        {
+            *err = "端口不合法";
+            return false;
+        }
+        ep.host = hostport.substr(0, colon);
+    }
+    else
+    {
+        ep.host = hostport;
+    }
+    if (!CheckEndpointPublic(ep, err)) return false;
+
+    static std::once_flag once;
+    std::call_once(once, [] { curl_global_init(CURL_GLOBAL_DEFAULT); });
+    CURL* c = curl_easy_init();
+    if (c == NULL)
+    {
+        *err = "curl_easy_init 失败";
+        return false;
+    }
+    curl_easy_setopt(c, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(c, CURLOPT_HTTPGET, 1L);
+    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, CurlWriteCb);
+    curl_easy_setopt(c, CURLOPT_WRITEDATA, body);
+    curl_easy_setopt(c, CURLOPT_TIMEOUT, timeoutSec);
+    curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, timeoutSec < 10 ? timeoutSec : 10L);
+    curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 0L);
+    curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(c, CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(c, CURLOPT_XFERINFOFUNCTION, CurlProgressCb);
+    struct curl_slist* h = NULL;
+    h = curl_slist_append(h, "Accept: application/json");
+    curl_easy_setopt(c, CURLOPT_HTTPHEADER, h);
+    const CURLcode rc = curl_easy_perform(c);
+    curl_slist_free_all(h);
+    long status = 0;
+    curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &status);
+    curl_easy_cleanup(c);
+    if (rc != CURLE_OK)
+    {
+        *err = std::string("网络错误：") + curl_easy_strerror(rc);
+        return false;
+    }
+    if (status != 200)
+    {
+        *err = "接口返回 HTTP " + std::to_string(status) + "：" + body->substr(0, 120);
+        return false;
+    }
+    return true;
+#endif
 }
 
 static bool LlmChatImpl(const LlmSettings& cfg, const std::vector<LlmMsg>& msgs, float temperature,

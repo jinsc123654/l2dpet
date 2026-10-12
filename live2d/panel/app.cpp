@@ -1598,7 +1598,7 @@ void PageBehavior(Pen& p)
         return v < 1.0f ? i18n::T("关") : (std::to_string((int)v) + i18n::T(" 分钟"));
     });
     Divider(p.ui, "d7", p.x, p.y, p.w);
-    ToggleRow(p, "t.weather", "天气闲聊", "闲时偶尔聊一句天气（没有实时数据，用关心/提问的方式）", "weather");
+    ToggleRow(p, "t.weather", "天气闲聊", "闲时偶尔聊一句天气（联网查真实天气；查不到就只关心/提问）", "weather");
     Divider(p.ui, "d8", p.x, p.y, p.w);
     {
         const Value& strv = S.st.get("config").get("str");

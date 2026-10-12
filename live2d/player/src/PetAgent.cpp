@@ -1856,20 +1856,36 @@ void PetAgent::RefreshWeather()
     const l2d::LlmSettings cfg = l2d::LlmLoadSettings();
     if (cfg.key.empty()) return;
     std::string err;
-    Log("让模型联网查询天气：" + _cfgWeatherLoc);
+    Log("联网查询天气：" + _cfgWeatherLoc);
+    // 取数顺序：先直连 open-meteo（免 key、不花 token，国内外链路都实测可达），
+    // 不行再退回模型的联网搜索（需要官方 DeepSeek 供应商）。两个都失败就保持"不聊天气、问你"。
     const bool ok = _weather.Refresh(_cfgWeatherLoc, now,
-        [cfg](const std::string& location, std::string* response, std::string* error) {
-            return l2d::LlmWeatherSearch(cfg, location, response, error);
+        [cfg](const std::string& location, std::string* facts, std::string* error) {
+            std::string directErr;
+            if (l2d::OpenMeteoWeather(location, facts, &directErr))
+            {
+                Log("天气取数：open-meteo 直连成功");
+                return true;
+            }
+            std::string response, modelErr;
+            if (l2d::LlmWeatherSearch(cfg, location, &response, &modelErr)
+                && PetWeather::ParseSearchResult(response, facts, &modelErr))
+            {
+                Log("天气取数：open-meteo 直连失败（" + directErr + "），模型联网搜索成功");
+                return true;
+            }
+            *error = "open-meteo 直连：" + directErr + "；模型联网搜索：" + modelErr;
+            return false;
         }, &err);
     if (ok)
     {
         const std::string dir = plat::HomeDir() + "/.config/l2dpet";
         plat::CreateDir(dir, true);
         if (!_weather.Save(dir + "/weather-search.json")) Log("天气查询缓存写入失败（本次仍可使用内存缓存）");
-        Log("模型天气查询完成，5 小时内复用");
+        Log("天气查询完成，5 小时内复用");
     }
-    else Log("模型天气查询未成功：" + err);
-    Report("天气查询", "模型原生联网搜索：" + _cfgWeatherLoc, NULL, ok, err, false, 0);
+    else Log("天气查询未成功：" + err);
+    Report("天气查询", _cfgWeatherLoc + "（直连失败才用模型搜索）", NULL, ok, err, false, 0);
 }
 
 void PetAgent::PushJokes()

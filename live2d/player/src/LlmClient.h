@@ -70,6 +70,15 @@ bool LlmHasHttps();
 bool LlmWeatherSearch(const LlmSettings& cfg, const std::string& location,
                       std::string* response, std::string* err);
 
+/** 直连 open-meteo（免 key、免注册）取天气：城市名 → 坐标 → 实况 + 两天预报，
+ *  成功时 *facts = 给 LLM 参考的事实表（解析与校验在 PetWeather，纯函数）。
+ *  国内外链路都实测可达；不需要任何模型/密钥。 */
+bool OpenMeteoWeather(const std::string& location, std::string* facts, std::string* err);
+
+/** 简单 GET（天气这类免 key 数据源用）：只允许 http/https 的公网地址，和 LLM 端点同一套
+ *  SSRF 校验；响应上限 2MB，不跟重定向。未编入 libcurl 的构建返回错误。 */
+bool HttpGet(const std::string& url, std::string* body, std::string* err, long timeoutSec = 12);
+
 /** 让进行中的/之后的 LlmChat 立即失败返回（退出时用：别让一个 60s 的请求把关窗拖住）。进程级。 */
 void LlmCancelAll();
 
