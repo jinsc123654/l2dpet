@@ -43,6 +43,7 @@ inline std::vector<DslWindowRequest>& dslWindowRequests() {
 struct DslAppState {
     bool composed = false;
     bool iconApplied = false;
+    bool windowReadyNotified = false;   // l2dpet 补丁：主窗口就绪回调只发一次
     float logicalWidth = 0.0f;
     float logicalHeight = 0.0f;
 };
@@ -350,6 +351,12 @@ bool initialize(core::window::Handle window) {
     if (!state.iconApplied) {
         detail::applyWindowIcon(window);
         state.iconApplied = true;
+    }
+    // l2dpet 补丁：主窗口就绪 → 通知应用（面板用它设 Windows 深色标题栏；只发一次，
+    // 免得后面开的弹出窗口也走这条回调）
+    if (!state.windowReadyNotified) {
+        state.windowReadyNotified = true;
+        if (config.windowReadyHandler) config.windowReadyHandler(window);
     }
     return detail::dslRuntime().initialize(window);
 }

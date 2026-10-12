@@ -746,6 +746,14 @@ void destroyWindow(Handle window) {
 NativeWindowInfo nativeWindowInfo(Handle window) {
     NativeWindowInfo result;
     result.handle = window;
+    // l2dpet 补丁：GLFW 后端的这个函数原来是"只回 handle、不回原生窗口"的桩（SDL 那版才填），
+    // 于是应用拿不到 HWND（面板设深色标题栏要它）。X11 侧暂不需要（要 NativeWindowInfo 的
+    // 应用只有面板，而深色标题栏是 Windows 的事），所以这里只补 Win32。
+#if defined(_WIN32)
+    if (window != nullptr) {
+        result.platformWindow = glfwGetWin32Window(static_cast<GLFWwindow*>(window));
+    }
+#endif
     return result;
 }
 

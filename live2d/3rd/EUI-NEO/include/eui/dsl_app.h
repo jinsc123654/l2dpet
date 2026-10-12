@@ -52,6 +52,8 @@ struct DslAppConfig {
     double tickIntervalValue = 0.0;
     bool startHiddenValue = false;
     bool hideOnCloseValue = false;
+    // l2dpet 补丁：主窗口就绪回调——应用拿原生句柄用（面板靠它设 Windows 的深色标题栏）
+    std::function<void(eui::window::Handle)> windowReadyHandler;
 
     DslAppConfig& title(std::string value) { titleValue = std::move(value); return *this; }
     DslAppConfig& pageId(std::string value) { pageIdValue = std::move(value); return *this; }
@@ -145,6 +147,11 @@ struct DslAppConfig {
     DslAppConfig& startHidden(bool value = true) { startHiddenValue = value; return *this; }
     /** 点关闭按钮 = 隐藏主窗口（不退出进程） */
     DslAppConfig& hideOnClose(bool value = true) { hideOnCloseValue = value; return *this; }
+    /** l2dpet 补丁：主窗口建好后调一次（窗口隐藏时也会调）——拿原生句柄改窗口级属性用 */
+    DslAppConfig& onWindowReady(std::function<void(eui::window::Handle)> handler) {
+        windowReadyHandler = std::move(handler);
+        return *this;
+    }
     DslAppConfig& onShutdown(std::function<void()> handler) {
         shutdownHandler = std::move(handler);
         return *this;

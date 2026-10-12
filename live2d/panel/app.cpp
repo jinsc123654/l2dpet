@@ -147,7 +147,7 @@ std::string SystemCjkFont()
 
 } // namespace
 
-namespace { void Tick(); }
+namespace { void Tick(); void OnMainWindowReady(core::window::Handle window); }
 
 /** 面板偏好（theme / lang）在启动时先读一次桌宠的 config.json：窗口标题和首帧主题要在
  *  连上桌宠之前就定好（协议里的值连上后会覆盖它，见 ApplyPrefs） */
@@ -210,6 +210,8 @@ const DslAppConfig& dslAppConfig()
             .startHidden()                       // 常驻：设置窗口按需显示
             .hideOnClose()                       // 关窗 = 收起，不退出
             .onTick([] { Tick(); }, 0.03)        // 收桌宠事件 / 开关菜单与气泡 / 托盘（主窗口隐藏时也跑）
+            // 主窗口就绪：拿到原生句柄，把系统画的标题栏也刷成当前主题（深色下那条白条很扎眼）
+            .onWindowReady([](core::window::Handle h) { OnMainWindowReady(h); })
             .tray(true)
             .trayTitle("Live2D 桌宠")
             // 托盘图标按平台给：宿主解析口径不一样，给错了就是"图标不显示"——
@@ -272,6 +274,7 @@ struct AppState
     // 主题 / 语言（面板偏好；"auto" 解析后存在这两个字段里）
     int themeMode = THEME_LIGHT;
     std::string langCode = "zh";
+    void* hwnd = nullptr;     // 主窗口原生句柄（onWindowReady 时填；Windows 设深色标题栏用）
     std::map<int, float> pageH;           // 各页内容高度（上一帧排版结果）
     eui::Signal<float> scroll[10];
     bool externalInit = false;
@@ -341,6 +344,53 @@ bool DarkNow()
     struct tm lt;
     plat::LocalTime(t, &lt);
     return lt.tm_hour >= 19 || lt.tm_hour < 7;
+}
+
+/** 标题栏（系统画的那条）跟着主题走：深色时用 DWM 的"沉浸式深色标题栏"，否则恢复系统色。
+ *  dwmapi 动态取（老系统没这个属性就静默跳过，标题栏保持系统色，面板本身不受影响）。
+ *  属性号：20 = Win10 1903+ / Win11；19 = 更早的 1809。两个都试，成功即止。 */
+void ApplyTitleBarTheme(void* nativeWindow, bool dark)
+{
+#if defined(_WIN32)
+    if (nativeWindow == NULL) return;
+    typedef HRESULT(WINAPI * SetWindowAttributeFn)(HWND, DWORD, LPCVOID, DWORD);
+    static SetWindowAttributeFn setAttribute = NULL;
+    static bool probed = false;
+    if (!probed)
+    {
+        probed = true;
+        if (HMODULE dwm = LoadLibraryW(L"dwmapi.dll"))
+        {
+            setAttribute = (SetWindowAttributeFn)GetProcAddress(dwm, "DwmSetWindowAttribute");
+        }
+    }
+    if (setAttribute == NULL) return;
+    const BOOL on = dark ? TRUE : FALSE;
+    if (FAILED(setAttribute((HWND)nativeWindow, 20, &on, sizeof(on))))
+    {
+        setAttribute((HWND)nativeWindow, 19, &on, sizeof(on));
+    }
+#else
+    (void)nativeWindow;
+    (void)dark;
+#endif
+}
+
+/** 主题一变（含"跟随时间"到点）就刷一次标题栏；没变就不碰（DWM 调用每 30ms 一次没必要） */
+int g_titleBarDark = -1;   // -1 = 还没设过
+void SyncTitleBar(bool dark)
+{
+    if (g_titleBarDark == (int)dark) return;
+    g_titleBarDark = dark ? 1 : 0;
+    ApplyTitleBarTheme(S.hwnd, dark);
+}
+
+/** 主窗口就绪（EUI 的 onWindowReady）：记下原生句柄，并把标题栏刷成当前主题。
+ *  定义在这儿是因为要用 S / DarkNow；注册处（dslAppConfig 在上文）只转发一下。 */
+void OnMainWindowReady(core::window::Handle window)
+{
+    S.hwnd = core::window::nativeWindowInfo(window).platformWindow;
+    SyncTitleBar(DarkNow());
 }
 
 /** EUI 组件的主题令牌（输入框/按钮/开关/滑块/滚动条/导航栏都吃它） */
@@ -459,6 +509,7 @@ void SetThemeMode(int mode)
     S.themeMode = std::clamp(mode, 0, 2);
     SetCfgStr("theme", mode == THEME_DARK ? "dark" : (mode == THEME_AUTO ? "auto" : "light"));
     S.traySig.clear();   // 托盘菜单里的勾选项要跟着变
+    SyncTitleBar(DarkNow());   // 标题栏立刻跟上，不等下一次 tick
     app::requestUpdate();
 }
 
@@ -3373,6 +3424,7 @@ void Tick()
     Refresh();
     ApplyPrefs();
     ApplyTheme();   // 主窗口可能一直没显示过：调色板必须在常驻 tick 里也刷
+    SyncTitleBar(DarkNow());   // "跟随时间"到点/别处改了主题：标题栏也跟着翻（没变时不动）
 #if defined(_WIN32)
     // 菜单开着时，点到菜单外的空白处应当收起。
     // Linux 靠弹窗失焦（上面 onFocusChange）判"点别处"；Windows 上前台锁让弹窗根本拿不到焦点
