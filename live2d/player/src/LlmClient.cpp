@@ -323,7 +323,12 @@ std::string BuildBody(const LlmSettings& cfg, const std::vector<LlmMsg>& msgs, f
     body += std::string("],\"temperature\":") + temp;
     if (cfg.maxReplyTokens > 0) body += ",\"max_tokens\":" + std::to_string(cfg.maxReplyTokens);
     if (jsonMode) body += ",\"response_format\":{\"type\":\"json_object\"}";
-    if (cfg.noThinking) body += ",\"reasoning_effort\":\"none\"";   // 思考型模型照格式写作不用想
+    if (cfg.noThinking)
+    {
+        // 关思考的两种常见写法都发上：OpenAI 系（mimo/DeepSeek）认 reasoning_effort，
+        // 网关系（智谱/通义等）认 thinking —— 谁认就用谁，不认的那个一般会被忽略
+        body += ",\"reasoning_effort\":\"none\",\"thinking\":{\"type\":\"disabled\"}";
+    }
     body += "}";
     return body;
 }
@@ -794,11 +799,16 @@ static bool LlmChatImpl(const LlmSettings& cfg, const std::vector<LlmMsg>& msgs,
     long timeoutSec = cfg.timeoutSec < 10 ? 10 : (cfg.timeoutSec > 300 ? 300 : cfg.timeoutSec);
     bool posted = CurlHttpPost(ep, body, cfg.key, &resp, err, ep.anthropic, timeoutSec,
                                timeoutSec < 15 ? timeoutSec : 15L);
-    if (!posted && cfg.noThinking && err->find("HTTP 4") != std::string::npos)
+    const bool validationFailed = err->find("HTTP 400") != std::string::npos
+                                  || err->find("HTTP 422") != std::string::npos;
+    if (!posted && validationFailed && (cfg.noThinking || cfg.maxReplyTokens > 0))
     {
-        // 老供应商可能不认关思考的字段（reasoning_effort / thinking）：被 4xx 拒了就摘掉重试一次
+        // 供应商不认我们加的可选字段时的兜底：
+        //   ① 关思考的字段不认（reasoning_effort / thinking）→ 摘掉重试；
+        //   ② 我们要的输出上限比它的上限大（报错里会提到 max_tokens）→ 改用供应商默认上限
         LlmSettings plain = cfg;
         plain.noThinking = false;
+        if (err->find("max_tokens") != std::string::npos) plain.maxReplyTokens = 0;
         const std::string retryBody = ep.anthropic ? BuildBodyAnthropic(plain, msgs, temperature)
                                                    : BuildBody(plain, msgs, temperature, jsonMode);
         resp.clear();
