@@ -2456,13 +2456,35 @@ void PageLLM(Pen& p)
           std::to_string((long long)stt.get("session_tok_in").numOr(0)),
           std::to_string((long long)stt.get("session_tok_out").numOr(0)) });
     const float tokenStatsH = TextH(tokenStats, p.w - 36.0f, 12.5f, 20.0f);
-    Card(p.ui, "stat.card", p.x, p.y, p.w, th + tokenStatsH + 100.0f);
+    // 台词库：最近一次成功更新时间（+ 组数/句数），有失败的话再列一条原因——
+    // "到底更新了没有"要一眼看得出来（0.0 秒/超时都让人怀疑）
+    const std::string linesAt = stt.get("lines_at").strOr("");
+    const std::string linesNote = stt.get("lines_note").strOr("");
+    const std::string linesFailAt = stt.get("lines_fail_at").strOr("");
+    const std::string linesFailErr = stt.get("lines_fail_err").strOr("");
+    const std::string linesLine = linesAt.empty()
+        ? i18n::T("台词库：本次运行还没成功更新过（用内置台词兜底）")
+        : i18n::TF("台词库：{} 更新 · {}", { linesAt, linesNote });
+    const std::string linesFailLine = linesFailAt.empty()
+        ? std::string()
+        : i18n::TF("最近一次失败：{} · {}", { linesFailAt, linesFailErr });
+    const float linesH = TextH(linesLine, p.w - 36.0f, 12.5f, 20.0f);
+    const float linesFailH = linesFailLine.empty() ? 0.0f : TextH(linesFailLine, p.w - 36.0f, 12.5f, 20.0f);
+    Card(p.ui, "stat.card", p.x, p.y, p.w, th + tokenStatsH + linesH + linesFailH + 104.0f);
     Text(p.ui, "stat.l1", p.x + 18.0f, p.y + 14.0f, p.w - 36.0f, th, l1, 14.0f, kText, 500, true);
     Text(p.ui, "stat.l2", p.x + 18.0f, p.y + 18.0f + th, p.w - 36.0f, 20.0f, l2, 12.5f, (int)stt.get("errors").numOr(0) > 0 ? kDanger : kMuted);
     Text(p.ui, "stat.tokens", p.x + 18.0f, p.y + th + 42.0f, p.w - 36.0f, tokenStatsH, tokenStats, 12.5f, kMuted, 400, true);
-    components::button(p.ui, "b.log").theme(Th(), false).position(p.x + 18.0f, p.y + th + tokenStatsH + 52.0f).size(120.0f, 36.0f)
+    Text(p.ui, "stat.lines", p.x + 18.0f, p.y + th + tokenStatsH + 48.0f, p.w - 36.0f, linesH, linesLine, 12.5f,
+         linesAt.empty() ? kMuted : kText, 400, true);
+    if (!linesFailLine.empty())
+    {
+        Text(p.ui, "stat.linesfail", p.x + 18.0f, p.y + th + tokenStatsH + linesH + 54.0f, p.w - 36.0f, linesFailH,
+             linesFailLine, 12.5f, kDanger, 400, true);
+    }
+    components::button(p.ui, "b.log").theme(Th(), false)
+        .position(p.x + 18.0f, p.y + th + tokenStatsH + linesH + linesFailH + 56.0f).size(120.0f, 36.0f)
         .text(i18n::T("交互日志 ›")).fontSize(14.0f).onClick([] { S.page = P_LOG; S.scroll[P_LOG].set(0.0f); }).build();
-    p.y += th + tokenStatsH + 120.0f;
+    p.y += th + tokenStatsH + linesH + linesFailH + 124.0f;
 }
 
 void PageLog(Pen& p)

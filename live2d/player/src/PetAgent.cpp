@@ -437,6 +437,18 @@ const double kBackgroundQuiet = 12.0;
 const double kLinesRefresh = 900.0;
 /** 台词库生成失败后的退避：一次不成就等这么久再试（太短会把 agent 堵在重试里，太长又赶不上"主人回答"） */
 const double kLinesRetry = 120.0;
+/** 长生成的单次请求上限（性格 / 题库 / 笑话 / 台词库 / 记忆整理）：这些要写很长的 JSON，
+ *  思考型模型（mimo、Claude 扩展思考）先想很久才吐答案，60 秒会假超时——日志里的
+ *  "网络错误：Timeout was reached" 就是这么来的 */
+const int kLongGenTimeoutSec = 180;
+
+/** 长生成用的接入参数：把单次超时放宽到 kLongGenTimeoutSec（性格/题库/笑话/台词库/记忆整理） */
+l2d::LlmSettings LongGenCfg(const l2d::LlmSettings& cfg)
+{
+    l2d::LlmSettings out = cfg;
+    out.timeoutSec = kLongGenTimeoutSec;
+    return out;
+}
 const double kIdlePeriodDefault = 60.0;
 
 // ---- 提示词（与 pet_agent.py 同文）
@@ -1525,14 +1537,14 @@ void PetAgent::CompressMemory(const std::string& reason)
     std::string err, report;
     Log("记忆压缩（" + reason + "）…");
     const bool ok = _mem->Compress(
-        [cfg](const std::string& prompt, std::string* owner, std::string* us) -> bool {
+        [this, cfg](const std::string& prompt, std::string* owner, std::string* us) -> bool {
             std::vector<l2d::LlmMsg> msgs;
             l2d::LlmMsg u;
             u.role = "user";
             u.content = prompt;
             msgs.push_back(u);
             std::string text, e;
-            if (!l2d::LlmChat(cfg, msgs, 0.3f, true, &text, &e, NULL)) return false;
+            if (!l2d::LlmChat(LongGenCfg(cfg), msgs, 0.3f, true, &text, &e, &_lastCall)) return false;
             text = StripFences(text);
             jsonlite::Value v;
             if (!jsonlite::parse(text.c_str(), text.size(), v, NULL) || !v.isObj()) return false;
@@ -1642,7 +1654,7 @@ void PetAgent::OpenPersona(bool regen, const std::string* guidance)
         const l2d::LlmSettings cfg2 = cfg;
         const std::string langHint = SpeechLangHint();
         const std::string langNow = LangResolve(_cfgLang);   // lambda 里不能碰 this：先算好
-        PetPersona::LlmFn call = [cfg2, langHint, langNow](const std::string& system, const std::string& user, std::string* out,
+        PetPersona::LlmFn call = [this, cfg2, langHint, langNow](const std::string& system, const std::string& user, std::string* out,
                                         std::string* e) -> bool {
             std::vector<l2d::LlmMsg> msgs;
             l2d::LlmMsg s;
@@ -1654,7 +1666,7 @@ void PetAgent::OpenPersona(bool regen, const std::string* guidance)
             u.content = user;
             msgs.push_back(u);
             std::string text;
-            if (!l2d::LlmChat(cfg2, msgs, 0.8f, true, &text, e, NULL)) return false;
+            if (!l2d::LlmChat(LongGenCfg(cfg2), msgs, 0.8f, true, &text, e, &_lastCall)) return false;
             *out = text;
             return true;
         };
@@ -1737,7 +1749,7 @@ void PetAgent::OpenQuestions(bool regen)
     const l2d::LlmSettings cfg2 = cfg;
     const std::string langHint = SpeechLangHint();
     const std::string langNow = LangResolve(_cfgLang);   // lambda 里不能碰 this：先算好
-    PetQuestions::LlmFn call = [cfg2, langHint, langNow](const std::string& system, const std::string& user, std::string* out,
+    PetQuestions::LlmFn call = [this, cfg2, langHint, langNow](const std::string& system, const std::string& user, std::string* out,
                                       std::string* e) -> bool {
         std::vector<l2d::LlmMsg> msgs;
         l2d::LlmMsg s;
@@ -1749,7 +1761,7 @@ void PetAgent::OpenQuestions(bool regen)
         u.content = user;
         msgs.push_back(u);
         std::string text;
-        if (!l2d::LlmChat(cfg2, msgs, 0.9f, true, &text, e, NULL)) return false;
+        if (!l2d::LlmChat(LongGenCfg(cfg2), msgs, 0.9f, true, &text, e, &_lastCall)) return false;
         *out = text;
         return true;
     };
@@ -1813,7 +1825,7 @@ void PetAgent::OpenJokes(bool force)
     const l2d::LlmSettings cfg2 = cfg;
     const std::string langHint = SpeechLangHint();
     const std::string langNow = LangResolve(_cfgLang);   // lambda 里不能碰 this：先算好
-    PetJokes::LlmFn call = [cfg2, langHint, langNow](const std::string& system, const std::string& user, std::string* out,
+    PetJokes::LlmFn call = [this, cfg2, langHint, langNow](const std::string& system, const std::string& user, std::string* out,
                                   std::string* e) -> bool {
         std::vector<l2d::LlmMsg> msgs;
         l2d::LlmMsg s;
@@ -1825,7 +1837,7 @@ void PetAgent::OpenJokes(bool force)
         u.content = user;
         msgs.push_back(u);
         std::string text;
-        if (!l2d::LlmChat(cfg2, msgs, 0.9f, true, &text, e, NULL)) return false;
+        if (!l2d::LlmChat(LongGenCfg(cfg2), msgs, 0.9f, true, &text, e, &_lastCall)) return false;
         *out = text;
         return true;
     };
@@ -1999,7 +2011,7 @@ void PetAgent::Consolidate(const std::string& reason, bool tidy)
     if (cfg.key.empty()) return;
     std::string err;
     const bool changed = _mem->Consolidate(
-        [cfg](const std::string& prompt, std::string* owner, std::string* us) -> bool
+        [this, cfg](const std::string& prompt, std::string* owner, std::string* us) -> bool
         {
             std::vector<l2d::LlmMsg> msgs;
             l2d::LlmMsg u;
@@ -2007,7 +2019,7 @@ void PetAgent::Consolidate(const std::string& reason, bool tidy)
             u.content = prompt;
             msgs.push_back(u);
             std::string text, e;
-            if (!l2d::LlmChat(cfg, msgs, 0.3f, true, &text, &e, NULL)) return false;
+            if (!l2d::LlmChat(LongGenCfg(cfg), msgs, 0.3f, true, &text, &e, &_lastCall)) return false;
             text = StripFences(text);
             jsonlite::Value v;
             if (!jsonlite::parse(text.c_str(), text.size(), v, NULL) || !v.isObj()) return false;
@@ -2176,7 +2188,7 @@ void PetAgent::LangRewriteAll(const std::string& lang)
         std::string err, report;
         const bool ok = _mem->Rewrite(
             l,
-            [cfg2](const std::string& prompt, std::string* owner, std::string* us) -> bool {
+            [this, cfg2](const std::string& prompt, std::string* owner, std::string* us) -> bool {
                 std::vector<l2d::LlmMsg> msgs;
                 l2d::LlmMsg s;
                 s.role = "system";
@@ -2187,7 +2199,7 @@ void PetAgent::LangRewriteAll(const std::string& lang)
                 u.content = prompt;
                 msgs.push_back(u);
                 std::string text, e;
-                if (!l2d::LlmChat(cfg2, msgs, 0.2f, true, &text, &e, NULL)) return false;
+                if (!l2d::LlmChat(LongGenCfg(cfg2), msgs, 0.2f, true, &text, &e, &_lastCall)) return false;
                 text = StripFences(text);
                 jsonlite::Value v;
                 if (!jsonlite::parse(text.c_str(), text.size(), v, NULL) || !v.isObj()) return false;
@@ -2346,6 +2358,7 @@ bool PetAgent::LlmSequence(const std::string& note, const std::string& memory, j
     for (int attempt = 0; attempt < 3; ++attempt)
     {
         std::string text, e;
+        // 对话段保持默认 60 秒超时：卡住时别把回应堵太久（长生成才用 LongGenCfg）
         if (!l2d::LlmChat(cfg, msgs, 0.9f, true, &text, &e, &_lastCall))
         {
             *err = e;
@@ -2424,7 +2437,7 @@ bool PetAgent::LlmReactLines(const std::string& memory, jsonlite::Value* linesOu
     bool parsed = false;
     for (int attempt = 0; attempt < 2 && !parsed; ++attempt)   // 偶发输出坏 JSON（日/英长输出更常见）：重试一次
     {
-        if (!l2d::LlmChat(cfg, msgs, 0.9f, true, &text, &e, &_lastCall))
+        if (!l2d::LlmChat(LongGenCfg(cfg), msgs, 0.9f, true, &text, &e, &_lastCall))
         {
             *err = e;
             return false;

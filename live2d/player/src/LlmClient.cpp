@@ -765,8 +765,7 @@ bool HttpGet(const std::string& url, std::string* body, std::string* err, long t
 }
 
 static bool LlmChatImpl(const LlmSettings& cfg, const std::vector<LlmMsg>& msgs, float temperature,
-                        bool jsonMode, std::string* content, std::string* err, LlmUsage* usage,
-                        long timeoutSec = 60L, long connectSec = 15L)
+                        bool jsonMode, std::string* content, std::string* err, LlmUsage* usage)
 {
     if (g_cancel.load())
     {
@@ -789,8 +788,18 @@ static bool LlmChatImpl(const LlmSettings& cfg, const std::vector<LlmMsg>& msgs,
                                           : BuildBody(cfg, msgs, temperature, jsonMode);
     const auto t0 = std::chrono::steady_clock::now();   // 墙钟（clock() 是 CPU 时间，等网络时几乎不走）
     std::string resp;
-    if (!CurlHttpPost(ep, body, cfg.key, &resp, err, ep.anthropic, timeoutSec, connectSec)) return false;
+    // 超时按调用方给的上限（10~300 秒）：长生成（性格/题库/台词库）要放宽，否则思考型模型容易假超时
+    long timeoutSec = cfg.timeoutSec < 10 ? 10 : (cfg.timeoutSec > 300 ? 300 : cfg.timeoutSec);
+    const bool posted = CurlHttpPost(ep, body, cfg.key, &resp, err, ep.anthropic, timeoutSec,
+                                     timeoutSec < 15 ? timeoutSec : 15L);
     const auto t1 = std::chrono::steady_clock::now();
+    const long long elapsedMs = (long long)std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+    if (!posted)
+    {
+        // 失败也要把真实耗时交给调用方：日志里"用时 X 秒（超时）"比一刀切的 0.0 秒有用得多
+        if (usage != NULL) usage->ms += elapsedMs;
+        return false;
+    }
     if (getenv("L2D_LLM_DEBUG") != NULL)   // 排障用：请求地址 + 响应头 200 字（L2D_LLM_DEBUG=1 打开）
     {
         fprintf(stderr, "[llm-debug] POST %s → %zu 字节响应：%.200s\n", FullUrl(ep).c_str(), resp.size(), resp.c_str());
@@ -802,7 +811,7 @@ static bool LlmChatImpl(const LlmSettings& cfg, const std::vector<LlmMsg>& msgs,
         return false;
     }
     LlmUsage measured;
-    measured.ms = (long long)std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+    measured.ms = elapsedMs;
     measured.tokIn = (long long)(ep.anthropic ? v.get("usage").get("input_tokens").numOr(0)
                                               : v.get("usage").get("prompt_tokens").numOr(0));
     measured.tokOut = (long long)(ep.anthropic ? v.get("usage").get("output_tokens").numOr(0)
@@ -924,9 +933,10 @@ bool LlmTest(const LlmSettings& cfg, LlmTestResult* out)
     msgs[0].content = "只回复两个字：好的";   // 最小请求：一句话、几乎不花 token
     LlmSettings probe = cfg;
     probe.maxReplyTokens = 64;
+    probe.timeoutSec = 30;   // 试连接不用等太久
     const auto t0 = std::chrono::steady_clock::now();
     std::string content;
-    const bool ok = LlmChatImpl(probe, msgs, 0.0f, false, &content, &err, NULL, 30L, 10L);
+    const bool ok = LlmChatImpl(probe, msgs, 0.0f, false, &content, &err, NULL);
     out->ms = (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
                   std::chrono::steady_clock::now() - t0).count();
     RecordStatus(ok, ok ? std::string() : err);

@@ -2402,7 +2402,15 @@ public:
             JStr(o, it->first);
             o += ":" + std::to_string(it->second);
         }
-        return o + "}}";
+        o += "},\"lines_at\":";
+        JStr(o, _linesAt);              // 台词库上次成功更新（时间 + 组/句数），失败另给
+        o += ",\"lines_note\":";
+        JStr(o, _linesNote);
+        o += ",\"lines_fail_at\":";
+        JStr(o, _linesFailAt);
+        o += ",\"lines_fail_err\":";
+        JStr(o, _linesFailErr);
+        return o + "}";
     }
     // ================================================================ 连续情绪（参考 soullink-emotion-sdk 的 VAD 思路）
     // 情绪不是"切一个表情"，而是一个连续状态：V 愉悦 / A 唤醒 / D 支配，各 -1..1。
@@ -3472,6 +3480,8 @@ private:
     long _llmCalls = 0, _llmErrors = 0, _llmQuestions = 0, _llmTokIn = 0, _llmTokOut = 0;
     std::map<std::string, long> _llmKinds;    // 回应/闲时/台词库… → 次数
     double _llmMsSum = 0.0;
+    // 台词库最近一次成功/失败（面板要能回答"到底更新了没有"）：取自 agent 的 llm_log 条目
+    std::string _linesAt, _linesNote, _linesFailAt, _linesFailErr;
     std::string _agentInfo;                   // agent 自报的接入来源（不含密钥）
     int _agentCount = 0;                      // 订阅事件的连接数（≈ LLM agent；面板不订阅，不算在内）
     int _panelReqPage = 0;

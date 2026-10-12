@@ -24,6 +24,8 @@ struct LlmSettings
     std::string keySource = "none";   // env / file / none（面板显示用，不含 key 本身）
     std::string providerName;         // 生效的供应商名（v2 配置；env 覆盖时为空）
     int maxReplyTokens = 0;          // Only bounded dialogue requests set this; maintenance retains its budget.
+    int timeoutSec = 60;             // 单次请求上限（秒）。性格/题库/台词库这种"要写很长 JSON"的
+                                     // 生成用更大的值（思考型模型可能先想很久才吐答案，60 秒会假超时）
 };
 
 /** 一个 LLM 供应商（v2 配置；一个供应商可挂多个模型，当前用一个） */

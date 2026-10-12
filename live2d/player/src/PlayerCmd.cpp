@@ -2658,7 +2658,24 @@ std::string L2DPlayer::PetCommand(const std::string& line, csmFloat32 fps, bool*
         _llmLog.push_back(raw);
         while (_llmLog.size() > 200) _llmLog.pop_front();
         ++_llmCalls;
-        ++_llmKinds[e.get("kind").strOr("?")];
+        const std::string kind = e.get("kind").strOr("?");
+        ++_llmKinds[kind];
+        const bool entryOk = e.get("ok").isBool() && e.get("ok").b;
+        if (kind == "台词库")   // 面板要一眼看出"台词库到底更新了没有"：记下最近一次成功/失败
+        {
+            if (entryOk)
+            {
+                _linesAt = e.get("t").strOr("");
+                _linesNote = e.get("note").strOr("");
+                _linesFailAt.clear();   // 成功即清掉旧失败提示
+                _linesFailErr.clear();
+            }
+            else
+            {
+                _linesFailAt = e.get("t").strOr("");
+                _linesFailErr = e.get("err").strOr("");
+            }
+        }
         if (e.get("ok").isBool() && !e.get("ok").b) ++_llmErrors;
         if (e.get("question").isBool() && e.get("question").b) ++_llmQuestions;
         _llmTokIn += (long)e.get("tok_in").numOr(0);
