@@ -2261,8 +2261,11 @@ public:
             if (_port != NULL && _port->Name() != NULL
                 && (strcmp(_port->Name(), "pet") == 0 || strcmp(_port->Name(), "glfwpet") == 0))
             {
-                // 首次显示前记住 / 配置来得晚时补上（见 PortX11Pet::SetSavedPlacement）
-                _port->SetSavedPlacement((int)Cfg("pos_l"), (int)Cfg("pos_b"), Cfg("pos_set") > 0.5f);
+                // 首次显示前记住 / 配置来得晚时补上（见 PortX11Pet::SetSavedPlacement）。
+                // 兼容旧配置：以前没有 pos_set，那时能存下的坐标一定非负 → 一对非负值就当作"存过"
+                const bool posSet = Cfg("pos_set") > 0.5f
+                    || (Cfg("pos_l") >= 0.0f && Cfg("pos_b") >= 0.0f);
+                _port->SetSavedPlacement((int)Cfg("pos_l"), (int)Cfg("pos_b"), posSet);
                 _port->SetZoom(uiZoom);
                 SetRenderZoom(1.0f);   // 渲染始终满幅（端口负责整体缩放）
             }

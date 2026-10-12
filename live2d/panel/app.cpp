@@ -1647,7 +1647,8 @@ void PageWindow(Pen& p)
     const Value& wcfg = S.st.get("config");
     const int posL = (int)wcfg.get("pos_l").numOr(0);
     const int posB = (int)wcfg.get("pos_b").numOr(0);
-    const bool posSet = wcfg.get("pos_set").numOr(0) > 0.5;
+    const bool posSet = wcfg.get("pos_set").numOr(0) > 0.5
+        || (posL >= 0 && posB >= 0);   // 兼容旧配置（没有 pos_set 时，一对非负坐标就是存过的）
     const std::string posLine = !posSet
         ? i18n::T("还没记录位置（默认停在屏幕左下角）")
         : i18n::TF("左边距 {} px · 底边距 {} px（负数表示伸到屏幕外）；重启按原样恢复",
