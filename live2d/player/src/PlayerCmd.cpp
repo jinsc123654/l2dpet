@@ -2538,6 +2538,22 @@ std::string L2DPlayer::PetCommand(const std::string& line, csmFloat32 fps, bool*
         }
         return head + "\"ok\":true,\"type\":\"llm_config\",\"llm\":" + LlmPublicJson() + "}";
     }
+    // 试连接（面板"对话"页的按钮）：{"cmd":"llm_test","base_url":…,"api_key":…,"llm_model":…}
+    // 缺省字段用当前激活的供应商；api_key 空/缺省 = 用已存的那把（面板不持有明文密钥）。
+    // 走的是真实调用同一条代码路径（同一份地址解析/协议识别/响应解析），所以"这里通=她就能用"。
+    if (cmd == "llm_test")
+    {
+        l2d::LlmSettings probe = l2d::LlmLoadSettings();
+        if (v.get("base_url").isStr() && !v.get("base_url").str.empty()) probe.baseUrl = v.get("base_url").str;
+        if (v.get("llm_model").isStr() && !v.get("llm_model").str.empty()) probe.model = v.get("llm_model").str;
+        if (v.get("api_key").isStr() && !v.get("api_key").str.empty()) probe.key = v.get("api_key").str;
+        l2d::LlmTestResult r;
+        l2d::LlmTest(probe, &r);
+        return head + "\"ok\":true,\"type\":\"llm_test\",\"result\":{\"ok\":" + std::string(r.ok ? "true" : "false")
+            + ",\"protocol\":" + JStrRet(r.protocol) + ",\"url\":" + JStrRet(r.url)
+            + ",\"model\":" + JStrRet(probe.model) + ",\"ms\":" + std::to_string(r.ms)
+            + ",\"sample\":" + JStrRet(r.sample) + ",\"error\":" + JStrRet(r.error) + "}}";
+    }
     // 多供应商全量保存（面板"对话"页用）：
     // {"cmd":"llm_providers","active":"id","providers":[{id,name,base_url,model,models:[...],api_key?}]}
     // api_key 空/缺省 = 保留该 id 原密钥（面板不持有明文密钥）

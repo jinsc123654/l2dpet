@@ -1,5 +1,6 @@
 /**
- * LlmClient.h — 内置 agent 的 LLM 接入（OpenAI 兼容 /chat/completions，非流式）
+ * LlmClient.h — 内置 agent 的 LLM 接入（OpenAI 兼容 /chat/completions，非流式；
+ * 接口地址带 /anthropic 段或就是 api.anthropic.com 时自动改用 Anthropic Messages /v1/messages）
  *
  * 传输：编入 libcurl 时 http/https 都走 curl；否则退回内置明文 HTTP/1.1（只支持 http://，
  * 供本地 Ollama/LM Studio 用——交叉编译不拖 TLS 的兜底路径）。
@@ -88,5 +89,20 @@ LlmStatus LlmLastStatus();
 /** 一次对话调用。成功时 *content = choices[0].message.content。 */
 bool LlmChat(const LlmSettings& cfg, const std::vector<LlmMsg>& msgs, float temperature,
              bool jsonMode, std::string* content, std::string* err, LlmUsage* usage);
+
+/** 试连接的结果（面板「对话 → 尝试连接」显示用） */
+struct LlmTestResult
+{
+    bool ok = false;
+    std::string protocol;   // openai / anthropic（按接口地址自动识别）
+    std::string url;        // 实际请求的完整地址——地址填错时一眼能看出拼成了什么
+    long long ms = 0;
+    std::string sample;     // 成功时：模型回的那句话
+    std::string error;      // 失败时：原因（含 HTTP 状态码与响应片段）
+};
+
+/** 试连接：用与真实调用**完全相同**的地址解析/协议/解析代码发一句最小的话。
+ *  面板上手动触发，所以不受"她睡着了"暂停影响；结果同时按真实请求记进连接状态。 */
+bool LlmTest(const LlmSettings& cfg, LlmTestResult* out);
 
 }   // namespace l2d

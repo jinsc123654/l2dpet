@@ -79,7 +79,9 @@ struct Value
 
     double numOr(double d) const { return type == NUM ? num : d; }
 
-    /** 取字符串；非字符串返回 fallback */
+    /** 取字符串；非字符串返回 fallback。
+     *  **返回 const char\***：要比较请先接成 std::string —— `v.get("k").strOr("") == "text"` 是指针比较，
+     *  永远为假（踩过两次：Anthropic 文本块、finish_reason 截断判定）。 */
     const char *strOr(const char *fallback) const
     {
         return type == STR ? str.c_str() : fallback;

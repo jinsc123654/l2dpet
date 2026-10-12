@@ -31,6 +31,10 @@ public:
     /** 取一条桌宠推来的事件（JSON 一行）；没有返回 false */
     bool popEvent(std::string* json);
 
+    /** 一次性的"请求-应答"：另开一条已认证连接，发一行、读一行就关。
+     *  不碰轮询那条连接，所以可以在后台线程里同步调用（如"尝试连接"要立刻拿结果）。 */
+    bool request(const std::string& json, std::string* reply, int timeoutMs = 40000);
+
 private:
     void loop();
     void eventLoop();

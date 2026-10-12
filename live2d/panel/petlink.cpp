@@ -131,6 +131,71 @@ std::string PetLink::snapshot(bool* connected) const
     return _state;
 }
 
+bool PetLink::request(const std::string& json, std::string* reply, int timeoutMs)
+{
+    reply->clear();
+    SockT s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+#ifdef _WIN32
+    if (s == INVALID_SOCKET) return false;
+#else
+    if (s < 0) return false;
+#endif
+    sockaddr_in addr;
+    std::memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons((unsigned short)_port);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);   // 只连本机
+    if (connect(s, (sockaddr*)&addr, sizeof(addr)) != 0)
+    {
+        CloseSocket(s);
+        return false;
+    }
+    bool ok = Authenticate(s, _port);
+    if (ok)
+    {
+        const std::string data = json + "\n";
+        size_t off = 0;
+        while (off < data.size())
+        {
+#ifdef _WIN32
+            const int n = ::send(s, data.data() + off, (int)(data.size() - off), 0);
+#else
+            const ssize_t n = ::send(s, data.data() + off, data.size() - off, MSG_NOSIGNAL);
+#endif
+            if (n <= 0) { ok = false; break; }
+            off += (size_t)n;
+        }
+    }
+    if (ok)
+    {
+        std::string buf;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+        for (;;)
+        {
+            const size_t nl = buf.find('\n');
+            if (nl != std::string::npos)
+            {
+                *reply = buf.substr(0, nl);
+                break;
+            }
+            if (std::chrono::steady_clock::now() >= deadline) { ok = false; break; }
+#ifdef _WIN32
+            WSAPOLLFD pfd{ s, POLLRDNORM, 0 };
+            if (WSAPoll(&pfd, 1, 100) <= 0) continue;
+#else
+            pollfd pfd{ s, POLLIN, 0 };
+            if (poll(&pfd, 1, 100) <= 0) continue;
+#endif
+            char chunk[4096];
+            const auto got = recv(s, chunk, sizeof(chunk), 0);
+            if (got <= 0) { ok = false; break; }
+            buf.append(chunk, (size_t)got);
+        }
+    }
+    CloseSocket(s);
+    return ok && !reply->empty();
+}
+
 void PetLink::closeSock()
 {
     if (_sock >= 0)

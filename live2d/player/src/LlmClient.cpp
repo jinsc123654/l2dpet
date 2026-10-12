@@ -169,7 +169,48 @@ struct Endpoint
 {
     std::string scheme, host, apiPath;
     int port = 80;
+    bool anthropic = false;   // 按接口地址识别出的协议：Anthropic Messages（见 AnthropicByUrl）
 };
+
+/** 接口地址带 "anthropic" 段（各家网关都这么写，如 https://host/anthropic）或就是官方域名
+ *  = Anthropic Messages 协议；其余一律按 OpenAI 兼容 */
+bool AnthropicByUrl(const std::string& host, const std::string& path)
+{
+    if (host == "api.anthropic.com") return true;
+    std::string low = path;
+    for (size_t i = 0; i < low.size(); ++i)
+    {
+        if (low[i] >= 'A' && low[i] <= 'Z') low[i] = (char)(low[i] + 32);
+    }
+    return low.find("anthropic") != std::string::npos;
+}
+
+/** Anthropic 端点的路径："" → /v1/messages；"/anthropic" → /anthropic/v1/messages；
+ *  "/v1" → /v1/messages；用户已经把 /messages 写全了就原样用 */
+std::string AnthropicPath(const std::string& path)
+{
+    const std::string tail = "/messages";
+    if (path.size() >= tail.size() && path.compare(path.size() - tail.size(), tail.size(), tail) == 0)
+    {
+        return path;
+    }
+    if (path.size() >= 3 && path.compare(path.size() - 3, 3, "/v1") == 0)
+    {
+        return path + "/messages";
+    }
+    return path + "/v1/messages";
+}
+
+/** 完整请求地址（试连接回报"实际拼成了什么"也用它） */
+std::string FullUrl(const Endpoint& ep)
+{
+    std::string url = ep.scheme + "://" + ep.host;
+    if ((ep.scheme == "https" && ep.port != 443) || (ep.scheme == "http" && ep.port != 80))
+    {
+        url += ":" + std::to_string(ep.port);
+    }
+    return url + ep.apiPath;
+}
 
 bool ParseEndpoint(const std::string& baseUrl, Endpoint* out, std::string* err)
 {
@@ -223,7 +264,12 @@ bool ParseEndpoint(const std::string& baseUrl, Endpoint* out, std::string* err)
         out->host = hostport;
     }
     while (!path.empty() && path[path.size() - 1] == '/') path.erase(path.size() - 1);
-    out->apiPath = (path.empty() ? "" : path) + "/chat/completions";
+    // 协议按地址识别：带 /anthropic 段（各家网关都这么写）或官方域名 = Anthropic Messages；
+    // 其余一律 OpenAI 兼容。以前不论哪种都只拼 /chat/completions，于是 Anthropic 端点一律 404
+    // ——"接口地址看着没填错，就是不能用"，只能靠试出来的错误里那串 404 HTML 去猜。
+    out->anthropic = AnthropicByUrl(out->host, path);
+    out->apiPath = out->anthropic ? AnthropicPath(path)
+                                  : (path.empty() ? "" : path) + "/chat/completions";
     if (out->apiPath.empty() || out->apiPath[0] != '/') out->apiPath = "/" + out->apiPath;
     return true;
 }
@@ -280,6 +326,53 @@ std::string BuildBody(const LlmSettings& cfg, const std::vector<LlmMsg>& msgs, f
     return body;
 }
 
+/** Anthropic Messages 的请求体：system 提到顶层、相邻同角色合并（Anthropic 要求 user/assistant 交替），
+ *  max_tokens 必填（OpenAI 那边"不填=用供应商默认"，这里没有这个选项，给个宽松值） */
+std::string BuildBodyAnthropic(const LlmSettings& cfg, const std::vector<LlmMsg>& msgs, float temperature)
+{
+    std::string system;
+    std::vector<LlmMsg> turns;
+    for (size_t i = 0; i < msgs.size(); ++i)
+    {
+        if (msgs[i].role == "system")
+        {
+            if (!system.empty()) system += "\n\n";
+            system += msgs[i].content;
+            continue;
+        }
+        if (!turns.empty() && turns.back().role == msgs[i].role)
+        {
+            turns.back().content += "\n\n" + msgs[i].content;
+        }
+        else
+        {
+            turns.push_back(msgs[i]);
+        }
+    }
+    if (turns.empty())
+    {
+        LlmMsg only;
+        only.role = "user";
+        only.content = "你好";
+        turns.push_back(only);
+    }
+    std::string body = "{\"model\":\"" + JsonEscape(cfg.model) + "\",\"messages\":[";
+    for (size_t i = 0; i < turns.size(); ++i)
+    {
+        if (i) body += ",";
+        body += "{\"role\":\"" + turns[i].role + "\",\"content\":\"" + JsonEscape(turns[i].content) + "\"}";
+    }
+    body += "],\"max_tokens\":" + std::to_string(cfg.maxReplyTokens > 0 ? cfg.maxReplyTokens : 4096);
+    float temp = temperature < 0.0f ? 0.0f : temperature;
+    if (temp > 1.0f) temp = 1.0f;   // Anthropic 的 temperature 上限就是 1.0
+    char tb[32];
+    snprintf(tb, sizeof(tb), "%.2f", temp);
+    body += std::string(",\"temperature\":") + tb;
+    if (!system.empty()) body += ",\"system\":\"" + JsonEscape(system) + "\"";
+    body += "}";
+    return body;
+}
+
 #if defined(L2D_WITH_CURL)
 
 size_t CurlWriteCb(char* ptr, size_t size, size_t nmemb, void* ud)
@@ -296,7 +389,8 @@ int CurlProgressCb(void*, curl_off_t, curl_off_t, curl_off_t, curl_off_t)
 }
 
 bool CurlHttpPost(const Endpoint& ep, const std::string& body, const std::string& key,
-                  std::string* resp, std::string* err, bool nativeSearch = false)
+                  std::string* resp, std::string* err, bool anthropic = false,
+                  long timeoutSec = 60L, long connectSec = 15L)
 {
     static std::once_flag once;   // curl_easy_init 隐式 global_init 不是线程安全的：显式做一次
     std::call_once(once, [] { curl_global_init(CURL_GLOBAL_DEFAULT); });
@@ -306,20 +400,15 @@ bool CurlHttpPost(const Endpoint& ep, const std::string& body, const std::string
         *err = "curl_easy_init 失败";
         return false;
     }
-    std::string url = ep.scheme + "://" + ep.host;
-    if ((ep.scheme == "https" && ep.port != 443) || (ep.scheme == "http" && ep.port != 80))
-    {
-        url += ":" + std::to_string(ep.port);
-    }
-    url += ep.apiPath;
+    const std::string url = FullUrl(ep);
     curl_easy_setopt(c, CURLOPT_URL, url.c_str());
     curl_easy_setopt(c, CURLOPT_POST, 1L);
     curl_easy_setopt(c, CURLOPT_POSTFIELDS, body.c_str());
     curl_easy_setopt(c, CURLOPT_POSTFIELDSIZE, (long)body.size());
     curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, CurlWriteCb);
     curl_easy_setopt(c, CURLOPT_WRITEDATA, resp);
-    curl_easy_setopt(c, CURLOPT_TIMEOUT, 60L);
-    curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 15L);
+    curl_easy_setopt(c, CURLOPT_TIMEOUT, timeoutSec);
+    curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, connectSec);
     curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 0L);   // 不跟重定向
     curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);         // 在 agent 线程里用：不许 curl 用信号做 DNS 超时
     curl_easy_setopt(c, CURLOPT_NOPROGRESS, 0L);
@@ -327,8 +416,9 @@ bool CurlHttpPost(const Endpoint& ep, const std::string& body, const std::string
     struct curl_slist* h = NULL;
     h = curl_slist_append(h, "Content-Type: application/json");
     h = curl_slist_append(h, ("Authorization: Bearer " + key).c_str());
-    if (nativeSearch)
+    if (anthropic)
     {
+        // Anthropic Messages 用 x-api-key；Authorization 一起带上（有的网关只看它，官方会忽略多余头）
         h = curl_slist_append(h, ("x-api-key: " + key).c_str());
         h = curl_slist_append(h, "anthropic-version: 2023-06-01");
     }
@@ -511,19 +601,6 @@ bool LlmWeatherSearch(const LlmSettings& cfg, const std::string& location,
 #endif
 }
 
-static bool LlmChatImpl(const LlmSettings& cfg, const std::vector<LlmMsg>& msgs, float temperature,
-                        bool jsonMode, std::string* content, std::string* err, LlmUsage* usage);
-
-bool LlmChat(const LlmSettings& cfg, const std::vector<LlmMsg>& msgs, float temperature,
-             bool jsonMode, std::string* content, std::string* err, LlmUsage* usage)
-{
-    // 没真正发请求的情况（退出中 / 睡眠暂停 / 没 Key）不记成一次结果——"已连接"状态只反映真实请求
-    const bool real = !g_cancel.load() && !g_paused.load() && !cfg.key.empty();
-    const bool ok = LlmChatImpl(cfg, msgs, temperature, jsonMode, content, err, usage);
-    if (real && !g_cancel.load()) RecordStatus(ok, ok ? std::string() : *err);
-    return ok;
-}
-
 LlmTokenStats LlmGetTokenStats()
 {
     std::lock_guard<std::mutex> lk(g_statusMu);
@@ -531,8 +608,107 @@ LlmTokenStats LlmGetTokenStats()
 }
 
 static bool LlmChatImpl(const LlmSettings& cfg, const std::vector<LlmMsg>& msgs, float temperature,
-                        bool jsonMode, std::string* content, std::string* err, LlmUsage* usage)
+                        bool jsonMode, std::string* content, std::string* err, LlmUsage* usage,
+                        long timeoutSec = 60L, long connectSec = 15L)
 {
+    if (g_cancel.load())
+    {
+        *err = "已取消（正在退出）";
+        return false;
+    }
+#if !defined(L2D_WITH_CURL)
+    (void)msgs;
+    (void)temperature;
+    (void)jsonMode;
+    (void)content;
+    (void)usage;
+    *err = "此构建未编入 libcurl，内置 agent 不可用（重新配置 CMake 找到 libcurl）";
+    return false;
+#else
+    Endpoint ep;
+    if (!ParseEndpoint(cfg.baseUrl, &ep, err)) return false;
+    if (!CheckEndpointPublic(ep, err)) return false;
+    const std::string body = ep.anthropic ? BuildBodyAnthropic(cfg, msgs, temperature)
+                                          : BuildBody(cfg, msgs, temperature, jsonMode);
+    const auto t0 = std::chrono::steady_clock::now();   // 墙钟（clock() 是 CPU 时间，等网络时几乎不走）
+    std::string resp;
+    if (!CurlHttpPost(ep, body, cfg.key, &resp, err, ep.anthropic, timeoutSec, connectSec)) return false;
+    const auto t1 = std::chrono::steady_clock::now();
+    if (getenv("L2D_LLM_DEBUG") != NULL)   // 排障用：请求地址 + 响应头 200 字（L2D_LLM_DEBUG=1 打开）
+    {
+        fprintf(stderr, "[llm-debug] POST %s → %zu 字节响应：%.200s\n", FullUrl(ep).c_str(), resp.size(), resp.c_str());
+    }
+    jsonlite::Value v;
+    if (!jsonlite::parse(resp.c_str(), resp.size(), v, NULL) || !v.isObj())
+    {
+        *err = "响应不是合法 JSON";
+        return false;
+    }
+    LlmUsage measured;
+    measured.ms = (long long)std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+    measured.tokIn = (long long)(ep.anthropic ? v.get("usage").get("input_tokens").numOr(0)
+                                              : v.get("usage").get("prompt_tokens").numOr(0));
+    measured.tokOut = (long long)(ep.anthropic ? v.get("usage").get("output_tokens").numOr(0)
+                                               : v.get("usage").get("completion_tokens").numOr(0));
+    {
+        std::lock_guard<std::mutex> lk(g_statusMu);
+        g_tokens.last = measured;
+        g_tokens.total.ms += measured.ms;
+        g_tokens.total.tokIn += measured.tokIn;
+        g_tokens.total.tokOut += measured.tokOut;
+    }
+    if (usage != NULL)
+    {
+        usage->ms += measured.ms;
+        usage->tokIn += measured.tokIn;
+        usage->tokOut += measured.tokOut;
+    }
+    std::string text;
+    bool truncated = false;
+    if (ep.anthropic)
+    {
+        const jsonlite::Value& blocks = v.get("content");
+        if (!blocks.isArr())
+        {
+            *err = "响应缺少 content";
+            return false;
+        }
+        // 只取 text 块：思考型模型（如 mimo-v2.6、Claude 扩展思考）会先给一段 thinking，不能当台词。
+        // 注意 strOr("") 返回 const char*，比字符串必须先用 std::string 接住（直接和字面量 == 是指针比较）
+        for (size_t i = 0; i < blocks.arr.size(); ++i)
+        {
+            const std::string type = blocks.arr[i].get("type").strOr("");
+            if (type == "text") text += blocks.arr[i].get("text").strOr("");
+        }
+        const std::string stop = v.get("stop_reason").strOr("");
+        truncated = stop == "max_tokens";
+    }
+    else
+    {
+        const jsonlite::Value& choices = v.get("choices");
+        if (!choices.isArr() || choices.arr.empty())
+        {
+            *err = "响应缺少 choices";
+            return false;
+        }
+        text = choices.arr[0].get("message").get("content").strOr("");
+        const std::string finish = choices.arr[0].get("finish_reason").strOr("");   // 同上：先接成 std::string
+        truncated = finish == "length";
+    }
+    if (truncated)
+    {
+        *err = "回复达到模型输出上限；请降低 Token 节省档位后重试";
+        return false; // Never retry truncated JSON as if it were malformed output.
+    }
+    *content = text;
+    return true;
+#endif
+}
+
+bool LlmChat(const LlmSettings& cfg, const std::vector<LlmMsg>& msgs, float temperature,
+             bool jsonMode, std::string* content, std::string* err, LlmUsage* usage)
+{
+    // 没真正发请求的情况（退出中 / 睡眠暂停 / 没 Key）不记成一次结果——"已连接"状态只反映真实请求
     if (g_cancel.load())
     {
         *err = "已取消（正在退出）";
@@ -548,59 +724,67 @@ static bool LlmChatImpl(const LlmSettings& cfg, const std::vector<LlmMsg>& msgs,
         *err = "没有 API Key（在桌宠「状态与设置 → 对话」里填，或设环境变量 LLM_API_KEY）";
         return false;
     }
+    const bool ok = LlmChatImpl(cfg, msgs, temperature, jsonMode, content, err, usage);
+    if (!g_cancel.load()) RecordStatus(ok, ok ? std::string() : *err);
+    return ok;
+}
+
+bool LlmTest(const LlmSettings& cfg, LlmTestResult* out)
+{
+    out->ok = false;
+    out->protocol = "openai";
+    out->url.clear();
+    out->ms = 0;
+    out->sample.clear();
+    out->error.clear();
+    if (cfg.baseUrl.empty())
+    {
+        out->error = "还没填接口地址（例如 https://api.deepseek.com）";
+        return false;
+    }
+    if (cfg.model.empty())
+    {
+        out->error = "还没选模型：在下面的「模型列表」里点「选用」";
+        return false;
+    }
+    if (cfg.key.empty())
+    {
+        out->error = "还没填 API Key";
+        return false;
+    }
 #if !defined(L2D_WITH_CURL)
-    (void)msgs;
-    (void)temperature;
-    (void)jsonMode;
-    (void)content;
-    (void)usage;
-    *err = "此构建未编入 libcurl，内置 agent 不可用（重新配置 CMake 找到 libcurl）";
+    out->error = "此构建未编入 libcurl，无法测试连接";
     return false;
 #else
     Endpoint ep;
-    if (!ParseEndpoint(cfg.baseUrl, &ep, err)) return false;
-    if (!CheckEndpointPublic(ep, err)) return false;
-    const std::string body = BuildBody(cfg, msgs, temperature, jsonMode);
-    const auto t0 = std::chrono::steady_clock::now();   // 墙钟（clock() 是 CPU 时间，等网络时几乎不走）
-    std::string resp;
-    if (!CurlHttpPost(ep, body, cfg.key, &resp, err)) return false;
-    const auto t1 = std::chrono::steady_clock::now();
-    jsonlite::Value v;
-    if (!jsonlite::parse(resp.c_str(), resp.size(), v, NULL) || !v.isObj())
+    std::string err;
+    if (!ParseEndpoint(cfg.baseUrl, &ep, &err)) { out->error = err; return false; }
+    out->protocol = ep.anthropic ? "anthropic" : "openai";
+    out->url = FullUrl(ep);   // 地址填错时，面板上直接看到"实际拼成了什么"
+    if (!CheckEndpointPublic(ep, &err)) { out->error = err; return false; }
+    std::vector<LlmMsg> msgs(1);
+    msgs[0].role = "user";
+    msgs[0].content = "只回复两个字：好的";   // 最小请求：一句话、几乎不花 token
+    LlmSettings probe = cfg;
+    probe.maxReplyTokens = 64;
+    const auto t0 = std::chrono::steady_clock::now();
+    std::string content;
+    const bool ok = LlmChatImpl(probe, msgs, 0.0f, false, &content, &err, NULL, 30L, 10L);
+    out->ms = (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
+                  std::chrono::steady_clock::now() - t0).count();
+    RecordStatus(ok, ok ? std::string() : err);
+    if (!ok)
     {
-        *err = "响应不是合法 JSON";
+        out->error = err;
         return false;
     }
-    LlmUsage measured;
-    measured.ms = (long long)std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
-    measured.tokIn = (long long)v.get("usage").get("prompt_tokens").numOr(0);
-    measured.tokOut = (long long)v.get("usage").get("completion_tokens").numOr(0);
-    {
-        std::lock_guard<std::mutex> lk(g_statusMu);
-        g_tokens.last = measured;
-        g_tokens.total.ms += measured.ms;
-        g_tokens.total.tokIn += measured.tokIn;
-        g_tokens.total.tokOut += measured.tokOut;
-    }
-    if (usage != NULL)
-    {
-        usage->ms += measured.ms;
-        usage->tokIn += measured.tokIn;
-        usage->tokOut += measured.tokOut;
-    }
-    const jsonlite::Value& choices = v.get("choices");
-    if (!choices.isArr() || choices.arr.empty())
-    {
-        *err = "响应缺少 choices";
-        return false;
-    }
-    const std::string text = choices.arr[0].get("message").get("content").strOr("");
-    if (std::string(choices.arr[0].get("finish_reason").strOr("")) == "length")
-    {
-        *err = "回复达到模型输出上限；请降低 Token 节省档位后重试";
-        return false; // Never retry truncated JSON as if it were malformed output.
-    }
-    *content = text;
+    std::string sample = content;
+    const size_t nl = sample.find('\n');
+    if (nl != std::string::npos) sample = sample.substr(0, nl);
+    // 按 UTF-8 字符截断（按字节截会把汉字切成半个，回给面板就是非法 UTF-8）
+    if (sample.size() > 60) sample = plat::Utf8Head(sample, 60) + "…";
+    out->sample = sample.empty() ? "（模型回了个空字符串）" : sample;
+    out->ok = true;
     return true;
 #endif
 }

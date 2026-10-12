@@ -237,6 +237,12 @@ namespace {
 using jsonlite::Value;
 using Clock = std::chrono::steady_clock;
 
+// 「尝试连接」的结果：后台线程发请求、UI 线程渲染 → 用互斥保护（不塞进 AppState，免得跨线程碰界面状态）
+std::mutex g_llmTestMu;
+int g_llmTestState = 0;        // 0 没试过 / 1 正在试 / 2 成功 / 3 失败
+std::string g_llmTestInfo;     // 成功：协议 + 耗时 + 模型回复样本；失败：错误原文
+std::string g_llmTestUrl;      // 实际请求的完整地址（地址填错时一眼看出拼成了什么）
+
 // ---------------------------------------------------------------- 状态
 // 页序：0 状态 / 1 行为 / 2 窗口 / 3 模型 / 4 对话 / 5 记忆 / 6 关于 / 7 日志（P_LOG，对话页的子页）
 //       8 外观 / 9 外部接入（追加页号 → 外部 agent 用 {"cmd":"panel","page":N} 打开的老页号不受影响）
@@ -2076,6 +2082,7 @@ void PageLLM(Pen& p)
 
     Section(p, "sec.prov", "供应商（同一时间只用激活的那一个）");
     AppState::LlmProvEd* cur = findEdit();
+    float testCardH = 0.0f;   // 「尝试连接」结果卡占的高度（下面算卡片高度时要算进去）
     // 供应商 chips 行
     const float chipH = 40.0f;
     float cx0 = p.x + 18.0f, cy0 = p.y + 14.0f;
@@ -2257,6 +2264,70 @@ void PageLLM(Pen& p)
             S.lpKey.set("");
             Toast(i18n::TF("已保存：{} 生效（agent 下一次调用就用它）", { e->name }));
         }, true);
+        // 试连接：不保存也能测当前表单（地址/模型/刚粘进来的密钥），走桌宠真实调用那条路
+        bf.add("prov.test", "尝试连接", [&] {
+            flushEdit();
+            AppState::LlmProvEd* e = findEdit();
+            if (e == nullptr) { Toast("先加一个供应商"); return; }
+            if (e->url.empty()) { Toast("先填接口地址"); return; }
+            if (e->model.empty()) { Toast("先在下面「模型列表」里点「选用」挑一个模型"); return; }
+            std::string typed;
+            std::map<std::string, std::string>::const_iterator nk = S.llmNewKeys.find(e->id);
+            if (nk != S.llmNewKeys.end()) typed = nk->second;   // 刚键入还没保存的密钥也拿来试
+            const std::string url = e->url, model = e->model;
+            {
+                std::lock_guard<std::mutex> lk(g_llmTestMu);
+                g_llmTestState = 1;
+                g_llmTestInfo.clear();
+                g_llmTestUrl = url;
+            }
+            app::requestUpdate();
+            std::thread([url, model, typed] {
+                std::string cmd = "{\"cmd\":\"llm_test\",\"base_url\":" + JStr(url)
+                                  + ",\"llm_model\":" + JStr(model) + "}";
+                if (!typed.empty())
+                {
+                    cmd = cmd.substr(0, cmd.size() - 1) + ",\"api_key\":" + JStr(typed) + "}";
+                }
+                std::string reply, info, shownUrl = url;
+                int state = 3;
+                if (!S.link.request(cmd, &reply))
+                {
+                    info = i18n::T("连不上桌宠：它没在跑，或控制端口不是面板连的那个（看「状态」页）");
+                }
+                else
+                {
+                    Value v;
+                    if (jsonlite::parse(reply.c_str(), reply.size(), v, nullptr) && v.isObj()
+                        && v.get("result").isObj())
+                    {
+                        const Value& r = v.get("result");
+                        const bool ok = r.get("ok").isBool() && r.get("ok").b;
+                        shownUrl = r.get("url").strOr(url.c_str());
+                        if (ok)
+                        {
+                            state = 2;
+                            info = i18n::TF("连上了：{} 协议 · 用时 {} 秒 · 模型回「{}」",
+                                            { r.get("protocol").strOr(""), Num1((double)r.get("ms").numOr(0) / 1000.0),
+                                              r.get("sample").strOr("") });
+                        }
+                        else
+                        {
+                            info = i18n::TF("试连接失败：{}", { r.get("error").strOr("") });
+                        }
+                    }
+                    else
+                    {
+                        info = i18n::T("桌宠的应答看不懂（版本对不上？）");
+                    }
+                }
+                std::lock_guard<std::mutex> lk(g_llmTestMu);
+                g_llmTestState = state;
+                g_llmTestInfo = info;
+                g_llmTestUrl = shownUrl;
+                app::requestUpdate();
+            }).detach();
+        });
         if (S.llmProvs.size() > 1)
         {
             bf.add("prov.del", "删除该供应商", [&] {
@@ -2296,13 +2367,41 @@ void PageLLM(Pen& p)
         const std::string hint = i18n::TF("存于 {}（仅本用户可读，0600）；环境变量优先",
                                           { std::string(llm.get("path").strOr("")) });
         Text(p.ui, "prov.hint", p.x + 18.0f, py + 4.0f, p.w - 36.0f, 20.0f, hint, 12.5f, kMuted);
+        // 「尝试连接」的结果：状态 + 详情 + 实际请求地址（地址填错时一眼看出拼成了什么）
+        int testState = 0;
+        std::string testInfo, testUrl;
+        {
+            std::lock_guard<std::mutex> lk(g_llmTestMu);
+            testState = g_llmTestState;
+            testInfo = g_llmTestInfo;
+            testUrl = g_llmTestUrl;
+        }
+        if (testState != 0)
+        {
+            const std::string testHead = testState == 1 ? i18n::T("正在连接…")
+                                        : (testState == 2 ? i18n::T("试连接成功") : i18n::T("试连接失败"));
+            const float infoH = testInfo.empty() ? 0.0f : TextH(testInfo, p.w - 36.0f, 12.5f, 20.0f);
+            const std::string urlLine = i18n::TF("实际请求：{}", { testUrl });
+            const float urlH = TextH(urlLine, p.w - 36.0f, 12.0f, 18.0f);
+            const float cardH = infoH + urlH + 46.0f;
+            Card(p.ui, "lt.card", p.x, py + 30.0f, p.w, cardH);
+            Text(p.ui, "lt.head", p.x + 18.0f, py + 42.0f, p.w - 36.0f, 20.0f, testHead, 13.5f,
+                 testState == 2 ? kAccent : (testState == 3 ? kDanger : kMuted), 700);
+            if (!testInfo.empty())
+            {
+                Text(p.ui, "lt.info", p.x + 18.0f, py + 66.0f, p.w - 36.0f, infoH, testInfo, 12.5f,
+                     testState == 3 ? kDanger : kText, 400, true);
+            }
+            Text(p.ui, "lt.url", p.x + 18.0f, py + 70.0f + infoH, p.w - 36.0f, urlH, urlLine, 12.0f, kMuted, 400, true);
+            testCardH = cardH + 34.0f;
+        }
     }
     else
     {
         Text(p.ui, "prov.empty", p.x + 18.0f, py + 6.0f, p.w - 36.0f, 22.0f,
              "还没有供应商：点上面「+ 添加」新建一个（名称 / 接口地址 / API Key / 模型列表）", 13.5f, kMuted);
     }
-    p.y += 14.0f + chipH + 14.0f + (cur != nullptr ? 3 * 60.0f + 52.0f + 40.0f + std::max(1.0f, (float)cur->models.size()) * 40.0f + 14.0f + 52.0f + 30.0f : 60.0f);
+    p.y += 14.0f + chipH + 14.0f + (cur != nullptr ? 3 * 60.0f + 52.0f + 40.0f + std::max(1.0f, (float)cur->models.size()) * 40.0f + 14.0f + 52.0f + 30.0f : 60.0f) + testCardH;
     p.y += 22.0f;
 
     Section(p, "sec.tokens", "Token 节省");
