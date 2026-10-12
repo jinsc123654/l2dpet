@@ -282,6 +282,7 @@ private:
     void LaunchUi(int page);
     static std::string FindUiBinary();
     void PushRightMenu(int rootX, int rootY);   // 右键：工作区 + 时间戳（UI 进程弹菜单）
+    void KeepBelowTaskbar();
     void BubbleTick();                          // 气泡淡入淡出/跟随/呈现（每帧）
     void AnchorBubble();                        // 重算/应用气泡锚点（冻结后在每帧只随窗口平移）
     bool CharMetrics(int* top, int* hMinX, int* hMaxX, int* bandH);   // 轮廓顶 + 头部带（扫 _lastFrame）
@@ -727,6 +728,7 @@ bool PortGlfwPet::Present(const uint32_t* fb, int width, int height)
     }
 #endif
     BubbleTick();
+    KeepBelowTaskbar();
     ReapUi();
     return true;
 }
@@ -1890,6 +1892,33 @@ bool PortGlfwPet::PollChoice(int* index)
     *index = _choicePending;
     _choicePending = -1;
     return true;
+}
+
+void PortGlfwPet::KeepBelowTaskbar()
+{
+#if defined(_WIN32)
+    if (!_appliedTop || _hidden || _win == nullptr) return;
+    HWND model = glfwGetWin32Window(_win);
+    HWND bubble = _bw != nullptr && _bubMapped ? glfwGetWin32Window(_bw) : nullptr;
+    // 只在模型所在显示器的任务栏确实被宠物盖住时调整，不抢焦点。
+    const HMONITOR monitor = MonitorFromWindow(model, MONITOR_DEFAULTTONEAREST);
+    for (HWND bar = GetTopWindow(nullptr); bar != nullptr; bar = GetWindow(bar, GW_HWNDNEXT))
+    {
+        wchar_t cls[64] = {};
+        GetClassNameW(bar, cls, 64);
+        if (wcscmp(cls, L"Shell_TrayWnd") != 0 && wcscmp(cls, L"Shell_SecondaryTrayWnd") != 0) continue;
+        if (!IsWindowVisible(bar) || MonitorFromWindow(bar, MONITOR_DEFAULTTONEAREST) != monitor) continue;
+        if (!(GetWindowLongPtrW(bar, GWL_EXSTYLE) & WS_EX_TOPMOST)) continue;
+        bool above = false;
+        for (HWND w = GetWindow(bar, GW_HWNDPREV); w != nullptr; w = GetWindow(w, GW_HWNDPREV))
+            if (w == model || w == bubble) { above = true; break; }
+        if (!above) return;
+        const UINT flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
+        if (bubble != nullptr) SetWindowPos(bubble, bar, 0, 0, 0, 0, flags);
+        SetWindowPos(model, bubble != nullptr ? bubble : bar, 0, 0, 0, 0, flags);
+        return;
+    }
+#endif
 }
 
 void PortGlfwPet::BubbleTick()

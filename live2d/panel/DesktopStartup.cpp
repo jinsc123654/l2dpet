@@ -4,6 +4,8 @@
 #include <sstream>
 #if defined(_WIN32)
 #include <windows.h>
+#include <shlobj.h>
+#include <shobjidl.h>
 static std::wstring StartupWide(const std::string& text)
 {
     const int size = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, nullptr, 0);
@@ -36,47 +38,70 @@ static std::string AutostartTarget()
 }
 
 #if defined(_WIN32)
-/** 当前用户的开机自启：HKCU 的 Run 键（不需要管理员，任务管理器"启动应用"里也能看到/禁用） */
-const wchar_t* kAutostartRunKey = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
-const wchar_t* kAutostartRunValue = L"l2dpet";
-
+// 使用用户 Startup 快捷方式，明确工作目录；保留旧 Run 项读取以便迁移。
+static const wchar_t* kRunKey = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+static std::wstring StartupShortcut()
+{
+    PWSTR folder = nullptr;
+    if (FAILED(SHGetKnownFolderPath(FOLDERID_Startup, 0, nullptr, &folder))) return {};
+    std::wstring path = std::wstring(folder) + L"\\l2dpet.lnk";
+    CoTaskMemFree(folder);
+    return path;
+}
+static bool LegacyRunEnabled()
+{
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, kRunKey, 0, KEY_QUERY_VALUE, &key) != ERROR_SUCCESS) return false;
+    const LONG result = RegQueryValueExW(key, L"l2dpet", nullptr, nullptr, nullptr, nullptr);
+    RegCloseKey(key);
+    return result == ERROR_SUCCESS;
+}
 bool AutostartEnabled()
 {
-    HKEY key = NULL;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, kAutostartRunKey, 0, KEY_QUERY_VALUE, &key) != ERROR_SUCCESS) return false;
-    const LONG r = RegQueryValueExW(key, kAutostartRunValue, NULL, NULL, NULL, NULL);
-    RegCloseKey(key);
-    return r == ERROR_SUCCESS;
+    const std::wstring path = StartupShortcut();
+    return (!path.empty() && GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES) || LegacyRunEnabled();
 }
-
 bool SetAutostart(bool on)
 {
-    HKEY key = NULL;
-    if (RegCreateKeyExW(HKEY_CURRENT_USER, kAutostartRunKey, 0, NULL, 0, KEY_SET_VALUE, NULL, &key, NULL) != ERROR_SUCCESS)
-    {
-        return false;
-    }
-    LONG r = ERROR_SUCCESS;
+    const std::wstring path = StartupShortcut();
+    if (path.empty()) return false;
     if (on)
     {
-        const std::string target = AutostartTarget();
-        if (target.empty())
+        const std::wstring target = StartupWide(AutostartTarget());
+        if (target.empty() || GetFileAttributesW(target.c_str()) == INVALID_FILE_ATTRIBUTES) return false;
+        const HRESULT init = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        if (FAILED(init) && init != RPC_E_CHANGED_MODE) return false;
+        IShellLinkW* link = nullptr;
+        HRESULT hr = CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER,
+                                      IID_IShellLinkW, (void**)&link);
+        if (SUCCEEDED(hr))
         {
-            RegCloseKey(key);
-            return false;
+            hr = link->SetPath(target.c_str());
+            const size_t slash = target.find_last_of(L"/\\");
+            if (SUCCEEDED(hr) && slash != std::wstring::npos)
+                hr = link->SetWorkingDirectory(target.substr(0, slash).c_str());
+            if (SUCCEEDED(hr)) hr = link->SetDescription(L"Live2D desktop pet");
+            if (SUCCEEDED(hr)) hr = link->SetShowCmd(SW_SHOWNORMAL);
+            IPersistFile* file = nullptr;
+            if (SUCCEEDED(hr)) hr = link->QueryInterface(IID_IPersistFile, (void**)&file);
+            if (SUCCEEDED(hr)) { hr = file->Save(path.c_str(), TRUE); file->Release(); }
+            link->Release();
         }
-        std::wstring cmd = L"\"" + StartupWide(target) + L"\"";   // 带空格/中文的路径必须加引号
-        r = RegSetValueExW(key, kAutostartRunValue, 0, REG_SZ, (const BYTE*)cmd.c_str(),
-                           (DWORD)((cmd.size() + 1) * sizeof(wchar_t)));
+        if (SUCCEEDED(init)) CoUninitialize();
+        if (FAILED(hr)) return false;
     }
-    else
+    else if (!DeleteFileW(path.c_str()) && GetLastError() != ERROR_FILE_NOT_FOUND) return false;
+    // 只有快捷方式写入成功后才移除旧入口，避免重复启动。
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, kRunKey, 0, KEY_SET_VALUE, &key) == ERROR_SUCCESS)
     {
-        r = RegDeleteValueW(key, kAutostartRunValue);
-        if (r == ERROR_FILE_NOT_FOUND) r = ERROR_SUCCESS;   // 本来就没开
+        const LONG result = RegDeleteValueW(key, L"l2dpet");
+        RegCloseKey(key);
+        if (result != ERROR_SUCCESS && result != ERROR_FILE_NOT_FOUND) return false;
     }
-    RegCloseKey(key);
-    return r == ERROR_SUCCESS;
+    return AutostartEnabled() == on;
 }
+
 #else
 /** Linux：XDG 自启项。打包里的启动器写的也是这个文件（l2dpet autostart on/off），
  *  两边互不冲突——谁写的都是同一个自启入口，off 都是删掉它。 */
