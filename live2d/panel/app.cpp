@@ -3057,6 +3057,7 @@ std::vector<MItem> MenuItems()
     if (Cfg("weather", 0) > 0.5f) add(MI_ACTION, "聊聊天气", "{\"cmd\":\"weather\"}");
     add(MI_SEP, "");
     add(MI_TOGGLE, "锁定大小和位置", "lock", 0, Cfg("lock", 0) > 0.5f);
+    add(MI_ACTION, "拉回屏幕内", "{\"cmd\":\"window\",\"on_screen\":true}");   // 拖到屏幕外找不着时用
     add(MI_TOGGLE, "鼠标穿透", "passthrough", 0, Cfg("passthrough", 0) > 0.5f);
     add(MI_HIDE, "隐藏到托盘");
     add(MI_QUIT, "退出");
@@ -3270,13 +3271,14 @@ void HandleEvent(const std::string& line)
 }
 
 // ---- 托盘（EUI 托盘 + 补丁的自定义菜单）
-enum { T_VIS = 1, T_PREFS = 2, T_TOP = 5, T_PASS = 6, T_QUIT = 9, T_THEME0 = 20, T_LANG0 = 30, T_MODEL0 = 100 };
+enum { T_VIS = 1, T_PREFS = 2, T_TOP = 5, T_PASS = 6, T_LOCK = 7, T_ONSCREEN = 8, T_QUIT = 9, T_THEME0 = 20, T_LANG0 = 30, T_MODEL0 = 100 };
 
 void UpdateTray()
 {
     const bool visible = !(S.st.get("visible").isBool() && !S.st.get("visible").b);
     const int cur = (int)S.st.get("model_index").numOr(0);
     std::string sig = std::string(visible ? "v" : "h") + (Cfg("top", 1) > 0.5f ? "t" : "-") + (Cfg("passthrough", 0) > 0.5f ? "p" : "-")
+                      + (Cfg("lock", 0) > 0.5f ? "l" : "-")
                       + std::to_string(cur) + (S.connected ? "c" : "n");
     for (const Value& m : S.st.get("models").arr) sig += "|" + m.str;
     if (sig == S.traySig) return;
@@ -3326,7 +3328,9 @@ void UpdateTray()
     }
     items.push_back(item(T_TOP, i18n::T("总在最前"), Cfg("top", 1) > 0.5f, S.connected));
     items.push_back(item(T_PASS, i18n::T("鼠标穿透"), Cfg("passthrough", 0) > 0.5f, S.connected));
-    items[items.size() - 1].checkable = items[items.size() - 2].checkable = true;
+    items.push_back(item(T_LOCK, i18n::T("锁定大小和位置"), Cfg("lock", 0) > 0.5f, S.connected));
+    for (size_t i = items.size() - 3; i < items.size(); ++i) items[i].checkable = true;
+    items.push_back(item(T_ONSCREEN, i18n::T("拉回屏幕内"), false, S.connected));   // 拖到屏幕外找不着时用
     items.push_back(sep);
     items.push_back(item(T_QUIT, i18n::T("退出")));
     eui::platform::setTrayMenu(items);
@@ -3342,6 +3346,8 @@ void HandleTrayClicks()
         else if (id == T_PREFS) { S.page = P_STATUS; app::showMainWindow(); }
         else if (id == T_TOP) SetCfg("top", Cfg("top", 1) > 0.5f ? 0.0f : 1.0f);
         else if (id == T_PASS) SetCfg("passthrough", Cfg("passthrough", 0) > 0.5f ? 0.0f : 1.0f);
+        else if (id == T_LOCK) SetCfg("lock", Cfg("lock", 0) > 0.5f ? 0.0f : 1.0f);
+        else if (id == T_ONSCREEN) S.link.send("{\"cmd\":\"window\",\"on_screen\":true}");
         else if (id == T_QUIT) { S.link.send("{\"cmd\":\"quit\"}"); }
         else if (id >= T_THEME0 && id < T_THEME0 + 3) SetThemeMode(id - T_THEME0);
         else if (id >= T_LANG0 && id < T_LANG0 + 4)
