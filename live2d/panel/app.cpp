@@ -1603,6 +1603,21 @@ void PageBehavior(Pen& p)
     {
         const Value& strv = S.st.get("config").get("str");
         const std::string loc = strv.get("weather_loc").strOr("");
+        // 回填已保存的城市：以前只写不回读，输入框永远是占位符，看着像"没保存/重启就没了"，
+        // 再点一次「保存位置」还会把存着的城市覆盖成空。规则：首次进页面填一次；之后只有当输入框
+        // 还是"干净"的（等于上次看到的已保存值）才接受外部变化，避免边输边被覆盖。
+        static bool locFilled = false;
+        static std::string locSeen;
+        if (!locFilled)
+        {
+            S.weatherLoc.set(loc);
+            locFilled = true;
+        }
+        else if (S.weatherLoc.get() == locSeen && S.weatherLoc.get() != loc)
+        {
+            S.weatherLoc.set(loc);
+        }
+        locSeen = loc;
         Text(p.ui, "loc.l", p.x + 18.0f, p.y + 9.0f, 120.0f, 22.0f, "位置（可选）", 15.0f, kText, 500);
         components::input(p.ui, "loc.in").theme(Th()).position(p.x + 140.0f, p.y).size(p.w - 300.0f, 40.0f)
             .placeholder(i18n::T("如：北京 / 上海浦东（留空=不提位置）")).bind(S.weatherLoc).fontSize(13.5f)
