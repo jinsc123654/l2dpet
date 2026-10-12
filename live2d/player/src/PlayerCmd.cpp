@@ -2770,6 +2770,8 @@ std::string L2DPlayer::PetCommand(const std::string& line, csmFloat32 fps, bool*
     if (cmd == "window")
     {
         if (_port != NULL && v.get("visible").isBool()) _port->SetWindowVisible(v.get("visible").b);
+        // 面板「窗口」页："拉回屏幕内"（她要是被拖到屏幕外找不着了，一键拉回整块可见）
+        if (_port != NULL && v.get("on_screen").isBool() && v.get("on_screen").b) _port->EnsureOnScreen();
         return head + "\"ok\":true,\"type\":\"window\",\"visible\":" + std::string(_port != NULL && _port->Hidden() ? "false" : "true") + "}";
     }
     if (cmd == "quit")

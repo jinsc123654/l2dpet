@@ -1642,6 +1642,25 @@ void PageWindow(Pen& p)
     Divider(p.ui, "d4", p.x, p.y, p.w);
     ToggleRow(p, "t.lock", "锁定大小和位置", "开启后拖动/滚轮不再挪动或缩放她（防误操作）；这里的滑条仍可改", "lock");
     p.y += 22.0f;
+
+    // 位置：显示存档坐标（以前存了却看不到），并给一个"被拖丢了"时的找回按钮
+    const Value& wcfg = S.st.get("config");
+    const int posL = (int)wcfg.get("pos_l").numOr(-1);
+    const int posB = (int)wcfg.get("pos_b").numOr(-1);
+    const std::string posLine = (posL < 0 || posB < 0)
+        ? i18n::T("还没记录位置（默认停在屏幕左下角）")
+        : i18n::TF("左边距 {} px · 底边距 {} px；拖到屏幕外也会按原样恢复", { std::to_string(posL), std::to_string(posB) });
+    Section(p, "sec.place", "位置");
+    const float posH = TextH(posLine, p.w - 36.0f, 12.5f, 20.0f);
+    Card(p.ui, "place.card", p.x, p.y, p.w, posH + 76.0f);
+    Text(p.ui, "place.line", p.x + 18.0f, p.y + 14.0f, p.w - 36.0f, posH, posLine, 12.5f, kMuted, 400, true);
+    components::button(p.ui, "b.onscreen").theme(Th(), false).position(p.x + 18.0f, p.y + posH + 24.0f).size(150.0f, 36.0f)
+        .text(i18n::T("拉回屏幕内")).fontSize(14.0f)
+        .onClick([] {
+            S.link.send("{\"cmd\":\"window\",\"on_screen\":true}");
+            Toast("已把她拉回屏幕内");
+        }).build();
+    p.y += posH + 98.0f;
 }
 
 // ---------------------------------------------------------------- 模型页

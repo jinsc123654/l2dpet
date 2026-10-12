@@ -473,12 +473,34 @@ public:
         _savedB = bottomGap;
     }
 
-    /** 第一次显示：存档位置（钳进工作区）/ 没存过 → 贴工作区左下角；尺寸此时已是最终尺寸 */
+    /** 至少留在屏幕里的像素：窗口越大留得越多（保证还抓得到、也看得见她的脸），但不超过一半 */
+    static int KeepVisiblePx(int size)
+    {
+        return std::max(48, std::min(size / 2, size / 4));
+    }
+    /** 位置钳制：**允许伸出屏幕**——运行时能拖出去，重启后就该按原样回到那里；
+     *  但至少留 KeepVisiblePx 像素在里面，免得她真的被拖丢了找不回来。 */
+    static int ClampKeepVisible(int pos, int lo, int hi, int size)
+    {
+        const int keep = KeepVisiblePx(size);
+        const int lowest = lo - size + keep;
+        const int highest = hi - keep;
+        if (highest <= lowest)
+        {
+            return lo;   // 窗口比 keep 还小（极端情况）：退回屏幕起点
+        }
+        return std::max(lowest, std::min(pos, highest));
+    }
+
+    /** 第一次显示：存档位置 / 没存过 → 贴工作区左下角；尺寸此时已是最终尺寸。
+     *  存档位置按"拖动允许的规则"恢复（可以伸出屏幕，只保证留一块抓得到），
+     *  不按旧行为夹进工作区——否则运行时故意挂在屏幕边上的她会'重启后自己跳回全身可见' */
     void MapInitial()
     {
         _mapPending = false;
         int wa[4];
         WorkAreaOrScreen(wa);
+        const int sw = DisplayWidth(_dpy, DefaultScreen(_dpy));
         const int sh = DisplayHeight(_dpy, DefaultScreen(_dpy));
         int x = wa[0], y = wa[1] + wa[3] - _h;   // 默认：工作区左下角（任务栏/Dock 之上）
         if (_savedL >= 0 && _savedB >= 0)
@@ -486,8 +508,8 @@ public:
             x = _savedL;
             y = sh - _savedB - _h;
         }
-        _winX = std::max(wa[0], std::min(x, wa[0] + wa[2] - _w));
-        _winY = std::max(wa[1], std::min(y, wa[1] + wa[3] - _h));
+        _winX = ClampKeepVisible(x, 0, sw, _w);
+        _winY = ClampKeepVisible(y, 0, sh, _h);
         XResizeWindow(_dpy, _win, (unsigned)_w, (unsigned)_h);
         XSizeHints hints;
         memset(&hints, 0, sizeof(hints));
@@ -556,8 +578,8 @@ public:
         const int nx = atLeft ? _winX : (atRight ? rx - nw : cx - nw / 2);
         _w = nw;
         _h = nh;
-        _winX = std::max(0, std::min(nx, sw - _w));
-        _winY = std::max(0, std::min(by - nh, sh - _h));
+        _winX = ClampKeepVisible(nx, 0, sw, _w);
+        _winY = ClampKeepVisible(by - nh, 0, sh, _h);
         XMoveResizeWindow(_dpy, _win, _winX, _winY, (unsigned)_w, (unsigned)_h);
         SavePlacement();
         _shapeCountdown = 0;     // 下一帧重扫轮廓（头位 → 气泡重定位跟上）
@@ -565,8 +587,34 @@ public:
         XFlush(_dpy);
     }
 
-    // ------------------------------------------------------------ 说话气泡（旧版设计：本进程 X11 直绘。
-    // 椭圆鼓泡 + 深青描边 + 下弯浅蓝 + 右上高光 + 两个小圆点沿法线指向角色；
+    /** 把她整个挪回工作区内（面板「窗口」页的"拉回屏幕内"）：用来救"被拖到找不着"的情况。
+     *  注意与启动恢复的区别：启动按存档原样放（允许伸在屏幕外），这里是明确的找回动作，放回整块可见 */
+    void EnsureOnScreen() override
+    {
+        if (_dpy == NULL || _win == 0)
+        {
+            return;
+        }
+        int wa[4];
+        WorkAreaOrScreen(wa);
+        const int nx = std::max(wa[0], std::min(_winX, wa[0] + wa[2] - _w));
+        const int ny = std::max(wa[1], std::min(_winY, wa[1] + wa[3] - _h));
+        if (nx == _winX && ny == _winY)
+        {
+            return;
+        }
+        _winX = nx;
+        _winY = ny;
+        XMoveWindow(_dpy, _win, _winX, _winY);
+        SavePlacement();
+        _shapeCountdown = 0;
+        _bubReposAt = (float)(NowSec() + 0.08);
+        XFlush(_dpy);
+        printf("[port:pet] 拉回屏幕内 → %d,%d\n", _winX, _winY);
+        fflush(stdout);
+    }
+
+    // ------------------------------------------------------------ 说话气泡（旧版设计：本进程 X11 直绘。    // 椭圆鼓泡 + 深青描边 + 下弯浅蓝 + 右上高光 + 两个小圆点沿法线指向角色；
     // SDF 像素级渲染（预乘 ARGB）+ Xft 文字；0.18s 淡入 / 0.22s 淡出）
     static int Utf8Len(unsigned char c)
     {

@@ -323,6 +323,11 @@ const std::pair<const char*, const char*> kEn[] = {
     { "开启后点不到她（不能拖动/右键），在这里或托盘里关掉", "While on you can't click her (no dragging, no right-click); turn it off here or from the tray" },
     { "锁定大小和位置", "Lock size & position" },
     { "开启后拖动/滚轮不再挪动或缩放她（防误操作）；这里的滑条仍可改", "While on, dragging and the wheel no longer move or resize her (stops accidents); the sliders here still work" },
+    { "位置", "Position" },
+    { "还没记录位置（默认停在屏幕左下角）", "No position saved yet (she starts at the bottom-left of the screen)" },
+    { "左边距 {} px · 底边距 {} px；拖到屏幕外也会按原样恢复", "Left {} px · from bottom {} px; restored exactly, even off-screen" },
+    { "拉回屏幕内", "Bring back on screen" },
+    { "已把她拉回屏幕内", "Moved her back on screen" },
 
     // ---------------------------------------------------------------- 外观页（主题 / 语言）
     { "界面的配色与语言（只影响面板自己；她说的话由 LLM 按语言生成）", "Panel colors and language (affects the panel itself; her spoken lines follow the language via the LLM)" },
@@ -865,6 +870,11 @@ const std::pair<const char*, const char*> kJa[] = {
     { "锁定大小和位置", "大きさと位置を固定" },
     { "开启后拖动/滚轮不再挪动或缩放她（防误操作）；这里的滑条仍可改",
       "オンにするとドラッグ/ホイールで動かなくなる（誤操作防止）。ここのスライダーは有効" },
+    { "位置", "位置" },
+    { "还没记录位置（默认停在屏幕左下角）", "位置はまだ記録なし（既定は画面の左下）" },
+    { "左边距 {} px · 底边距 {} px；拖到屏幕外也会按原样恢复", "左 {} px · 下から {} px。画面外にドラッグしてもそのまま復元" },
+    { "拉回屏幕内", "画面内に戻す" },
+    { "已把她拉回屏幕内", "画面内に戻しました" },
 
     // ---------------------------------------------------------------- 外观页（主题 / 语言）
     { "界面的配色与语言（只影响面板自己；她说的话由 LLM 按语言生成）",

@@ -106,6 +106,10 @@ public:
         (void)bottomGap;
     }
 
+    /** 把窗口整个挪回屏幕内（面板「窗口」页的"拉回屏幕内"；她要是真被拖丢了，一键找回来）。
+     *  默认什么都不做：只有实现了窗口位置的端口才有意义。 */
+    virtual void EnsureOnScreen() {}
+
     /**
      * 说话气泡（桌宠用；其它 port 默认忽略）。text 为 UTF-8（可含 \n）；
      * options/count = 可点击的选项（count=0 表示无选项）；seconds 后自动消失（<=0 = 隐藏）。
