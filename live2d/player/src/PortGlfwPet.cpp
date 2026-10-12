@@ -144,6 +144,8 @@ public:
     bool PollClick(int* x, int* y) override;
     bool PollWheel(int* delta) override;
     void SetZoom(float zoom) override;
+    void SetSavedPlacement(int left, int bottomGap, bool valid) override;
+    void EnsureOnScreen() override;
 
     void ShowBubble(const char* text, const char* const* options, int optionCount, float seconds) override;
     void HideBubble() override;
@@ -172,6 +174,11 @@ private:
     void RefreshFromState();
     void ApplyZoom(float zoom);
     void MoveToDefaultSpot();
+    void ApplySavedPlacement();                    // 按存档位置落位（启动时 / 配置迟到时）
+    void SavePlacement();                          // 拖动/缩放/找回之后把位置写回 config
+    void MonitorBoundsAt(int x, int y, int* mx, int* my, int* mw, int* mh);   // 含该点的显示器整屏范围
+    void MonitorBounds(int* mx, int* my, int* mw, int* mh);                   // 窗口所在显示器的整屏范围
+    static int ClampKeepVisible(int pos, int lo, int hi, int size);
     void UpdateInputShape(const uint32_t* px);   // Linux：XShape 输入区域 = 角色轮廓
     bool PointOnCharacter(int winX, int winY) const;   // 软件命中（帧 alpha 轮廓）
 #if defined(_WIN32)
@@ -206,6 +213,13 @@ private:
     int _w = 360, _h = 600;
     int _renderW = 360, _renderH = 600;
     int _winX = 0, _winY = 0;
+    // 存档位置（config pos_l = 窗口左边 x，pos_b = 窗口底边距显示器底边的距离；两个都允许是负数）
+    int _savedL = 0, _savedB = 0;
+    bool _savedValid = false;      // 存过位置
+    bool _placementDone = false;   // 已按存档落位：配置再变也不往回拽
+    bool _movedByUser = false;     // 用户自己拖过：不再套用存档
+    bool _shownOnce = false;       // 首帧已上屏
+    bool _sizeSettled = false;     // 真实渲染尺寸已定（首个 Present 之后的首次缩放之后）
     float _ui = 1.0f;
     float _zoom = 1.0f;
     bool _quit = false;
@@ -689,6 +703,7 @@ bool PortGlfwPet::Present(const uint32_t* fb, int width, int height)
     GlUploadSurface(&_surf, src, _w, _h, _w, _h);
     glfwSwapBuffers(_win);
     glfwPollEvents();
+    _shownOnce = true;   // 首帧上屏：存档落位/启动缩放到此结束，之后才允许记录位置（见 SavePlacement）
 
 #if defined(__linux__)
     if (--_shapeCountdown <= 0 && !_pressed)
@@ -883,6 +898,12 @@ void PortGlfwPet::PumpGlobalInput()
     _wasDown = down;
     _wasDownR = downR;
 #endif
+    // 松开左键：一次拖动结束 → 记住位置（写回 config，下次启动回到这里）
+    if (!down && _dragging)
+    {
+        _dragging = false;
+        SavePlacement();
+    }
     // 拖动 / 滑动 / 抬起（两条输入源共用这段）；锁定大小和位置时拖动不生效（按下抬起仍算一次点击）
     if (down && _pressed && !_lock)
     {
@@ -895,6 +916,7 @@ void PortGlfwPet::PumpGlobalInput()
             {
                 _winX = nx;
                 _winY = ny;
+                _movedByUser = true;
                 glfwSetWindowPos(_win, _winX, _winY);
             }
         }
@@ -994,6 +1016,87 @@ const uint32_t* PortGlfwPet::FxComposite(const uint32_t* src)
 
 // ---------------------------------------------------------------- 缩放 / 显示隐藏 / 输入区域
 
+/** 至少留在屏幕里的像素：只要一小条就够（**尽量按用户拖的原样记录**——有人就是要把她挂出去）。
+ *  真拖到完全看不见了，面板「窗口」页有「拉回屏幕内」一键找回，所以这里不保守（与 X11 端口同规则） */
+int PortGlfwPet::ClampKeepVisible(int pos, int lo, int hi, int size)
+{
+    const int keep = 8;
+    const int lowest = lo - size + keep;
+    const int highest = hi - keep;
+    if (highest <= lowest) return lo;   // 窗口比 keep 还小（极端情况）：退回屏幕起点
+    return std::max(lowest, std::min(pos, highest));
+}
+
+/** 记住位置：左边 x + 底边距**显示器底边**的距离（缩放以底边为基准，所以存"底"而不是"顶"）。
+ *  两个值都允许是负数（挂在屏幕外时左边可以为负、底边距为负 = 有一截在屏幕下方）。
+ *  与 X11 端口共用同一份 config 键（pos_l / pos_b / pos_set），两边随时可以接着用。 */
+void PortGlfwPet::SavePlacement()
+{
+    // 首帧显示之前不记录：启动路径里窗口位置/尺寸还要被配置改写（存档落位、缩放），
+    // 那会儿记下的是默认位，会把用户上次的位置覆盖掉——实测就是这样把存档顶掉的
+    if (!_shownOnce) return;
+    int mx = 0, my = 0, mw = 0, mh = 0;
+    MonitorBounds(&mx, &my, &mw, &mh);
+    if (mw <= 0 || mh <= 0) return;
+    char b[160];
+    snprintf(b, sizeof(b), "{\"cmd\":\"config\",\"set\":{\"pos_l\":%d,\"pos_b\":%d,\"pos_set\":1}}",
+             _winX, (my + mh) - (_winY + _h));
+    _portCmds.push_back(b);   // 交给主循环按协议执行（和 X11 端口同一条路）
+}
+
+void PortGlfwPet::SetSavedPlacement(int left, int bottomGap, bool valid)
+{
+    _savedL = left;
+    _savedB = bottomGap;
+    _savedValid = valid;
+    if (!valid || _placementDone || _movedByUser || _win == NULL)
+    {
+        return;   // 没存过 / 已经落位过 / 用户自己拖过了
+    }
+    // 窗口在 Initialize 里就已按默认位显示（当初她永远停在默认位），配置一到这里就补上
+    ApplySavedPlacement();
+}
+
+/** 把窗口挪到存档位置（和启动恢复同一套钳制：允许伸出屏幕，只保证留一块抓得到的）。
+ *  选显示器按存档的左边 x（水平坐标是绝对的）：多屏时她挂在哪块屏上就回哪块屏。 */
+void PortGlfwPet::ApplySavedPlacement()
+{
+    if (!_savedValid || _win == NULL) return;
+    int mx = 0, my = 0, mw = 0, mh = 0;
+    MonitorBoundsAt(_savedL + _w / 2, _winY + _h / 2, &mx, &my, &mw, &mh);
+    if (mw <= 0 || mh <= 0) return;
+    _placementDone = true;
+    const int nx = ClampKeepVisible(_savedL, mx, mx + mw, _w);
+    const int ny = ClampKeepVisible(my + mh - _savedB - _h, my, my + mh, _h);
+    if (nx == _winX && ny == _winY) return;
+    _winX = nx;
+    _winY = ny;
+    glfwSetWindowPos(_win, _winX, _winY);
+    _shapeCountdown = 0;   // 位置变了：输入区域下一帧重算
+    _anchorOk = false;     // 气泡锚点跟着重算
+    fprintf(stderr, "[glfwpet] 还原存档位置 → %d,%d\n", _winX, _winY);   // stderr：GUI 子系统构建下 stdout 会丢
+}
+
+/** 面板/托盘「拉回屏幕内」：把她整个挪回工作区（明确的找回动作，放回整块可见）。
+ *  与启动恢复的区别：启动按存档原样放、允许伸在屏幕外，见 ApplySavedPlacement。 */
+void PortGlfwPet::EnsureOnScreen()
+{
+    if (_win == NULL) return;
+    int mx = 0, my = 0, mw = 0, mh = 0;
+    WindowWorkarea(&mx, &my, &mw, &mh);
+    if (mw <= 0 || mh <= 0) return;
+    const int nx = std::max(mx, std::min(_winX, mx + mw - _w));
+    const int ny = std::max(my, std::min(_winY, my + mh - _h));
+    if (nx == _winX && ny == _winY) return;
+    _winX = nx;
+    _winY = ny;
+    glfwSetWindowPos(_win, _winX, _winY);
+    _shapeCountdown = 0;
+    _anchorOk = false;
+    SavePlacement();   // 找回后的位置也要记住
+    fprintf(stderr, "[glfwpet] 拉回屏幕内 → %d,%d\n", _winX, _winY);
+}
+
 void PortGlfwPet::MoveToDefaultSpot()
 {
     int mx = 0, my = 0, mw = 0, mh = 0;
@@ -1008,26 +1111,52 @@ void PortGlfwPet::ApplyZoom(float zoom)
     if (zoom < 0.5f) zoom = 0.5f;
     if (zoom > 2.0f) zoom = 2.0f;
     _zoom = zoom;
+    // 启动阶段 = 真实渲染尺寸还没定下来：窗口先按 cfg 的尺寸建（360x600），首个 Present 才知道
+    // 真实渲染尺寸（480x800），那之后的首次缩放才算把尺寸定下来。这段里存过位置就一律按存档落位，
+    // 不能走锚点——否则窗口尺寸一变，她就从存档位平移出去（用户看到的"开机时向右偏移"）。
+    const bool settling = _savedValid && !_movedByUser && !_sizeSettled;
+    if (_shownOnce && !_sizeSettled) _sizeSettled = true;
     int nw = (int)(_renderW * _zoom + 0.5f) & ~1;
     int nh = (int)(_renderH * _zoom + 0.5f) & ~1;
-    int mx = 0, my = 0, mw = 0, mh = 0;
-    WindowWorkarea(&mx, &my, &mw, &mh);
-    if (nw > mw) { const float k = (float)mw / (float)nw; nw = mw; nh = (int)(nh * k); }
-    if (nh > mh) { const float k = (float)mh / (float)nh; nh = mh; nw = (int)(nw * k); }
+    {
+        int wx = 0, wy = 0, ww = 0, wh = 0;
+        WindowWorkarea(&wx, &wy, &ww, &wh);   // 尺寸上限按工作区（别大到盖住任务栏）
+        if (ww > 0 && nw > ww) { const float k = (float)ww / (float)nw; nw = ww; nh = (int)(nh * k); }
+        if (wh > 0 && nh > wh) { const float k = (float)wh / (float)nh; nh = wh; nw = (int)(nw * k); }
+    }
     if (nw < 2) nw = 2;
     if (nh < 2) nh = 2;
     if (nw == _w && nh == _h) return;
-    // 底边中点锚（脚不动往上长，与 X11 端口同语义）
-    const int cx = _winX + _w / 2, by = _winY + _h;
+    // 位置钳制一律按"至少留一块抓得到"，不夹进工作区：挂在屏幕边上的她不该因为缩放被拽回屏内
+    int mx = 0, my = 0, mw = 0, mh = 0;
+    MonitorBounds(&mx, &my, &mw, &mh);
+    // 锚点一律用**旧**尺寸算（贴边/中点都是相对改尺寸之前的位置），再换到新尺寸
+    const int oldW = _w, oldH = _h;
+    const bool atLeft = _winX <= mx + 8, atRight = _winX + oldW >= mx + mw - 8;
+    const int cx = _winX + oldW / 2, by = _winY + oldH, rx = _winX + oldW;
     _w = nw;
     _h = nh;
-    _winX = std::max(mx, std::min(cx - nw / 2, mx + mw - _w));
-    _winY = std::max(my, std::min(by - nh, my + mh - _h));
+    if (settling)
+    {
+        // 按存档落位（左边 + 底边距，与尺寸无关）：尺寸怎么变都停在同一个位置
+        _placementDone = true;
+        _winX = ClampKeepVisible(_savedL, mx, mx + mw, _w);
+        _winY = ClampKeepVisible(my + mh - _savedB - _h, my, my + mh, _h);
+        fprintf(stderr, "[glfwpet] 按存档落位（尺寸定下来后）→ %d,%d\n", _winX, _winY);
+    }
+    else
+    {
+        // 锚点：底边不动；水平——贴左边就左边不动、贴右边就右边不动，否则中点不动（与 X11 端口同语义）
+        const int nx = atLeft ? _winX : (atRight ? rx - nw : cx - nw / 2);
+        _winX = ClampKeepVisible(nx, mx, mx + mw, _w);
+        _winY = ClampKeepVisible(by - nh, my, my + mh, _h);
+    }
     glfwSetWindowSize(_win, _w, _h);
     glfwSetWindowPos(_win, _winX, _winY);
     _shapeCountdown = 0;
     _anchorOk = false;   // 窗口尺寸变了：气泡锚点得按新的轮廓重算
     _fxBufW = 0;   // 特效/缩放缓冲下一帧重分配
+    SavePlacement();   // 用户改缩放：位置跟着变了，一并记下来（首帧之前会被 SavePlacement 自己挡掉）
 }
 
 void PortGlfwPet::SetZoom(float zoom)
@@ -1436,37 +1565,58 @@ bool PortGlfwPet::EnsureBubbleWindow(int w, int h)
     return true;
 }
 
-/** 窗口所在显示器的工作区。
+/** 含该点的显示器；没有就主屏。
  *  原来各处都写 glfwGetPrimaryMonitor()：双屏时角色能拖到第二块屏（拖动不做钳制），
  *  但气泡/缩放/菜单全被按主屏工作区钳回去——气泡就"留在主屏"跟不上。窗口模式没有
  *  glfwGetWindowMonitor（返回 NULL），按窗口中心落在哪块显示器来选。*/
+static GLFWmonitor* GlfwMonitorAtPoint(int x, int y)
+{
+    int n = 0;
+    GLFWmonitor** mons = glfwGetMonitors(&n);
+    for (int i = 0; i < n; ++i)
+    {
+        int px = 0, py = 0;
+        glfwGetMonitorPos(mons[i], &px, &py);
+        const GLFWvidmode* vm = glfwGetVideoMode(mons[i]);
+        if (vm != NULL && x >= px && x < px + vm->width && y >= py && y < py + vm->height)
+        {
+            return mons[i];
+        }
+    }
+    return glfwGetPrimaryMonitor();
+}
+
 void PortGlfwPet::WindowWorkarea(int* mx, int* my, int* mw, int* mh)
 {
     GLFWmonitor* mon = glfwGetWindowMonitor(_win);
-    if (mon == NULL)
-    {
-        mon = glfwGetPrimaryMonitor();
-        const int cx = _winX + _w / 2, cy = _winY + _h / 2;
-        int n = 0;
-        GLFWmonitor** mons = glfwGetMonitors(&n);
-        for (int i = 0; i < n; ++i)
-        {
-            int px = 0, py = 0;
-            glfwGetMonitorPos(mons[i], &px, &py);
-            const GLFWvidmode* vm = glfwGetVideoMode(mons[i]);
-            if (vm != NULL && cx >= px && cx < px + vm->width && cy >= py && cy < py + vm->height)
-            {
-                mon = mons[i];
-                break;
-            }
-        }
-    }
+    if (mon == NULL) mon = GlfwMonitorAtPoint(_winX + _w / 2, _winY + _h / 2);
     if (mon == NULL)
     {
         *mx = 0; *my = 0; *mw = 0; *mh = 0;
         return;
     }
     glfwGetMonitorWorkarea(mon, mx, my, mw, mh);
+}
+
+/** 含该点的显示器**整屏**范围（不是工作区）：存档位置存的是"底边距屏幕底"，
+ *  要按整屏算才对得上（工作区少了任务栏那一条，位置会整体偏移） */
+void PortGlfwPet::MonitorBoundsAt(int x, int y, int* mx, int* my, int* mw, int* mh)
+{
+    GLFWmonitor* mon = GlfwMonitorAtPoint(x, y);
+    if (mon == NULL)
+    {
+        *mx = 0; *my = 0; *mw = 0; *mh = 0;
+        return;
+    }
+    glfwGetMonitorPos(mon, mx, my);
+    const GLFWvidmode* vm = glfwGetVideoMode(mon);
+    *mw = vm != NULL ? vm->width : 0;
+    *mh = vm != NULL ? vm->height : 0;
+}
+
+void PortGlfwPet::MonitorBounds(int* mx, int* my, int* mw, int* mh)
+{
+    MonitorBoundsAt(_winX + _w / 2, _winY + _h / 2, mx, my, mw, mh);
 }
 
 /** 角色轮廓（窗口坐标）：top = 最顶不透明行；hMinX/hMaxX/bandH = 头部带（顶部 1/8，含
