@@ -409,6 +409,35 @@ std::string PetMemory::Context(const std::string& query, const ZoneNameFn& zoneC
     return out;
 }
 
+std::string PetMemory::FreshText() const
+{
+    std::string out;
+    // 1) 还没归纳进记忆本的"待整理"要点：新的在后（append 顺序），只带最新的十来条
+    const std::vector<jsonlite::Value> pending = PendingAll();
+    if (!pending.empty())
+    {
+        const size_t keep = 10;
+        const size_t begin = pending.size() > keep ? pending.size() - keep : 0;
+        std::string block;
+        for (size_t i = begin; i < pending.size(); ++i)
+        {
+            const std::string text = pending[i].get("text").strOr("");
+            if (text.empty()) continue;
+            const std::string date = pending[i].get("d").strOr("");
+            block += "- " + (date.empty() ? text : date + " " + text) + "\n";
+        }
+        if (!block.empty()) out += peti18n::Tr("刚发生/刚知道的（新的在后）：") + "\n" + block;
+    }
+    // 2) 主人最近亲口答过的题（最能代表偏好）：ChoiceMade 存的格式就是「问题」→答案
+    const std::vector<std::string> choices = RecentChoices();
+    if (!choices.empty())
+    {
+        out += peti18n::Tr("主人最近亲口答过：") + "\n";
+        for (size_t i = 0; i < choices.size(); ++i) out += "- " + choices[i] + "\n";
+    }
+    return out;
+}
+
 std::string PetMemory::PanelText(const ZoneNameFn& zoneCn) const
 {
     // 段标题与占位都是"自带文案" → 按界面语言翻（正文是她自己那份记忆，已经跟着语言走过一遍）

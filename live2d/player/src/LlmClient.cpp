@@ -323,6 +323,7 @@ std::string BuildBody(const LlmSettings& cfg, const std::vector<LlmMsg>& msgs, f
     body += std::string("],\"temperature\":") + temp;
     if (cfg.maxReplyTokens > 0) body += ",\"max_tokens\":" + std::to_string(cfg.maxReplyTokens);
     if (jsonMode) body += ",\"response_format\":{\"type\":\"json_object\"}";
+    if (cfg.noThinking) body += ",\"reasoning_effort\":\"none\"";   // 思考型模型照格式写作不用想
     body += "}";
     return body;
 }
@@ -370,6 +371,7 @@ std::string BuildBodyAnthropic(const LlmSettings& cfg, const std::vector<LlmMsg>
     snprintf(tb, sizeof(tb), "%.2f", temp);
     body += std::string(",\"temperature\":") + tb;
     if (!system.empty()) body += ",\"system\":\"" + JsonEscape(system) + "\"";
+    if (cfg.noThinking) body += ",\"thinking\":{\"type\":\"disabled\"}";   // 长生成不用长思考链
     body += "}";
     return body;
 }
@@ -790,8 +792,19 @@ static bool LlmChatImpl(const LlmSettings& cfg, const std::vector<LlmMsg>& msgs,
     std::string resp;
     // 超时按调用方给的上限（10~300 秒）：长生成（性格/题库/台词库）要放宽，否则思考型模型容易假超时
     long timeoutSec = cfg.timeoutSec < 10 ? 10 : (cfg.timeoutSec > 300 ? 300 : cfg.timeoutSec);
-    const bool posted = CurlHttpPost(ep, body, cfg.key, &resp, err, ep.anthropic, timeoutSec,
-                                     timeoutSec < 15 ? timeoutSec : 15L);
+    bool posted = CurlHttpPost(ep, body, cfg.key, &resp, err, ep.anthropic, timeoutSec,
+                               timeoutSec < 15 ? timeoutSec : 15L);
+    if (!posted && cfg.noThinking && err->find("HTTP 4") != std::string::npos)
+    {
+        // 老供应商可能不认关思考的字段（reasoning_effort / thinking）：被 4xx 拒了就摘掉重试一次
+        LlmSettings plain = cfg;
+        plain.noThinking = false;
+        const std::string retryBody = ep.anthropic ? BuildBodyAnthropic(plain, msgs, temperature)
+                                                   : BuildBody(plain, msgs, temperature, jsonMode);
+        resp.clear();
+        posted = CurlHttpPost(ep, retryBody, cfg.key, &resp, err, ep.anthropic, timeoutSec,
+                              timeoutSec < 15 ? timeoutSec : 15L);
+    }
     const auto t1 = std::chrono::steady_clock::now();
     const long long elapsedMs = (long long)std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
     if (!posted)

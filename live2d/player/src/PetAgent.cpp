@@ -441,13 +441,31 @@ const double kLinesRetry = 120.0;
  *  思考型模型（mimo、Claude 扩展思考）先想很久才吐答案，60 秒会假超时——日志里的
  *  "网络错误：Timeout was reached" 就是这么来的 */
 const int kLongGenTimeoutSec = 180;
+/** 长生成的输出上限（性格 / 题库 / 笑话 / 台词库 / 记忆整理）。这些不跟"Token 节省档位"走：
+ *  档位是给对话省钱的，而一次台词库要写一百多句、思考型模型还要先想一大段（思考也算输出），
+ *  按档位给（768~1536）必然截断——日志里"回复达到模型输出上限"就是这么来的 */
+const int kLongGenMaxTokens = 8192;
 
-/** 长生成用的接入参数：把单次超时放宽到 kLongGenTimeoutSec（性格/题库/笑话/台词库/记忆整理） */
+/** 长生成用的接入参数：放宽超时与输出上限、关掉思考（档位只约束对话）。
+ *  关思考的理由：台词库/性格这些是"照格式写作"，不需要长思考链；思考型模型（mimo-v2.6 等）
+ *  开着思考会多花几倍时间（实测同一个任务 6.5 秒 → 2.6 秒）并把思考也算进输出上限 */
 l2d::LlmSettings LongGenCfg(const l2d::LlmSettings& cfg)
 {
     l2d::LlmSettings out = cfg;
     out.timeoutSec = kLongGenTimeoutSec;
+    out.maxReplyTokens = kLongGenMaxTokens;
+    out.noThinking = true;
     return out;
+}
+
+/** 长生成的失败说明：被输出上限截断 = "这次要写的东西太长"，跟 Token 节省档位无关，别指错方向 */
+std::string LongGenErr(const std::string& err)
+{
+    if (err.find("达到模型输出上限") != std::string::npos)
+    {
+        return "这次生成太长，被输出上限截断（已保留原有内容；Token 节省档位只约束对话，不影响这里）";
+    }
+    return err;
 }
 const double kIdlePeriodDefault = 60.0;
 
@@ -1682,7 +1700,7 @@ void PetAgent::OpenPersona(bool regen, const std::string* guidance)
     }
     if (!ok)
     {
-        Log("性格 LLM 生成未成（" + err + "）→ 用本地兜底");
+        Log("性格 LLM 生成未成（" + LongGenErr(err) + "）→ 用本地兜底");
         _persona.Heuristic(fp, _caps.modelName, _caps.exprFv);
     }
     std::string werr;
@@ -1692,7 +1710,7 @@ void PetAgent::OpenPersona(bool regen, const std::string* guidance)
         + "（" + _persona.Get().by + "）");
     Report("性格", "为 " + _caps.modelName + " " + (regen ? "重新生成" : "解算") + "性格（"
                        + (_persona.Get().by == "llm" ? "LLM" : "本地兜底") + "）：" + _persona.Get().name,
-           NULL, ok, ok ? "" : err, false, 0);
+           NULL, ok, ok ? "" : LongGenErr(err), false, 0);
     PushPersona();
 }
 
@@ -1770,11 +1788,11 @@ void PetAgent::OpenQuestions(bool regen)
     for (int attempt = 0; attempt < 2 && !ok; ++attempt)
     {
         ok = _questions.Generate(fp, _caps.modelName, _persona.LinesRole(), knownQA, call, &err);
-        if (!ok && attempt == 0) Log("问题库生成失败（" + err + "），重试一次…");
+        if (!ok && attempt == 0) Log("问题库生成失败（" + LongGenErr(err) + "），重试一次…");
     }
     if (!ok)
     {
-        Log("问题库生成未成（" + err + "）——这次先不提问，下次再试");
+        Log("问题库生成未成（" + LongGenErr(err) + "）——这次先不提问，下次再试");
         return;
     }
     std::string werr;
@@ -1851,7 +1869,7 @@ void PetAgent::OpenJokes(bool force)
     }
     if (!ok)
     {
-        Log("笑话生成未成（" + err + "）——这次先不补，下次再试");
+        Log("笑话生成未成（" + LongGenErr(err) + "）——这次先不补，下次再试");
         return;
     }
     std::string werr;
@@ -1954,11 +1972,19 @@ void PetAgent::PushLines(const std::string& reason)
     }
     jsonlite::Value lines;
     std::string err;
-    const std::string memCtx = _mem != NULL ? StripStamps(_mem->Context("", [this](const std::string& z) { return ZoneCn(z); })) : "";
+    // 记忆：**最新的放最前面**（还没归纳进记忆本的"待整理"要点 + 主人刚亲口答过的题），
+    // 台词库要优先照它写；后面才是记忆本里的常规上下文
+    std::string memCtx;
+    if (_mem != NULL)
+    {
+        const std::string fresh = StripStamps(_mem->FreshText());
+        if (!fresh.empty()) memCtx = "【最新记忆（优先照它写）】\n" + fresh + "\n【记忆本】\n";
+        memCtx += StripStamps(_mem->Context("", [this](const std::string& z) { return ZoneCn(z); }));
+    }
     if (!LlmReactLines(memCtx, &lines, &err))
     {
-        Report("台词库", "生成即时台词库", NULL, false, err, false, 0);
-        Log("台词库生成失败（" + err + "），桌宠用内置台词");
+        Report("台词库", "生成即时台词库", NULL, false, LongGenErr(err), false, 0);
+        Log("台词库生成失败（" + LongGenErr(err) + "），桌宠用内置台词");
         _linesRetryAt = NowSec() + kLinesRetry;   // 失败退避（_linesLast 只记成功，所以这里必须自己记）
         return;
     }
@@ -2420,7 +2446,9 @@ bool PetAgent::LlmReactLines(const std::string& memory, jsonlite::Value* linesOu
     {
         mb = "\n- 你记得的事（跨会话记忆）——每组台词里最多 1 句可以自然呼应它（主人的称呼、"
              "一起经历过的小事、偏好），其余句子保持通用：这些台词会被长期反复播放，"
-             "太具体会让主人听腻、也会露馅。\n" + memory + "\n";
+             "太具体会让主人听腻、也会露馅。\n"
+             "- 标着「刚发生/刚知道的」那段是最新记忆（含还没归进记忆本的新鲜事、主人刚亲自答过的话）："
+             "**优先**照它调整口吻与个别句子，别把它当成旧事略过。\n" + memory + "\n";
     }
     // 角色描述 = 模型名 + 这个模型的性格（PetPersona）：台词库要按她的口吻写
     const std::string prompt = LangFixup(std::string(kLinesPromptA) + _persona.LinesRole() + kLinesPromptB + zones

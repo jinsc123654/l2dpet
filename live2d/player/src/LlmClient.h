@@ -26,6 +26,8 @@ struct LlmSettings
     int maxReplyTokens = 0;          // Only bounded dialogue requests set this; maintenance retains its budget.
     int timeoutSec = 60;             // 单次请求上限（秒）。性格/题库/台词库这种"要写很长 JSON"的
                                      // 生成用更大的值（思考型模型可能先想很久才吐答案，60 秒会假超时）
+    bool noThinking = false;         // 关思考：长生成（台词库/性格…）是照格式写作，不需要长思考链；
+                                     // 思考型模型（mimo 等）开着思考会多花几倍时间与 token
 };
 
 /** 一个 LLM 供应商（v2 配置；一个供应商可挂多个模型，当前用一个） */

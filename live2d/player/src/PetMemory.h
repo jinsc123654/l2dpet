@@ -33,6 +33,9 @@ public:
     int OwnerKnown() const;                       // 关于主人真正了解几条（≤1 = 该找机会问）
     std::string HabitsText(const ZoneNameFn& zoneCn) const;
     std::string Context(const std::string& query, const ZoneNameFn& zoneCn) const;
+    /** 最新要点：还没归纳进记忆本的"待整理"条目（新的在后）+ 主人最近亲口答过的题。
+     *  给"要立刻体现新知道的事"的生成用（台词库）：不用等下一次归纳就能用上刚发生的事 */
+    std::string FreshText() const;
     std::string PanelText(const ZoneNameFn& zoneCn) const;
     std::vector<std::string> Recall(const std::string& query, int k = 3) const;
     double Gap() const { return _gap; }           // 距上次见面（秒；首次 = -1）
