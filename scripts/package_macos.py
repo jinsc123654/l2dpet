@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Create a relocatable, ad-hoc signed macOS app and DMG (not hardware tested)."""
-import pathlib, plistlib, platform, shutil, subprocess, sys, zipfile
+import pathlib, plistlib, platform, shutil, subprocess, sys
 root, work = map(pathlib.Path, sys.argv[1:])
 version = (root / 'version.txt').read_text().strip().strip('{}').strip()
 arch = platform.machine()
@@ -15,10 +15,13 @@ resources = contents / 'Resources'
 for p in (mac, libs, resources): p.mkdir(parents=True)
 for name, build in [('l2dtest', 'build-host'), ('l2dpet-ui', 'build-panel')]:
     shutil.copy2(work / build / name, mac / name)
-shutil.copytree(root / 'live2d/bundled-models', mac / 'models')
-shutil.copytree(work / 'build-panel/assets', mac / 'assets')
+shutil.copytree(root / 'live2d/bundled-models', resources / 'models')
+shutil.copytree(work / 'build-panel/assets', resources / 'assets')
 for name in ('l2dpet.png', 'l2dpet-logo.png'):
-    shutil.copy2(work / 'build-panel' / name, mac / name)
+    shutil.copy2(work / 'build-panel' / name, resources / name)
+# Existing runtime resolves assets beside the executable; links keep Resources canonical.
+for name in ('models', 'assets', 'l2dpet.png', 'l2dpet-logo.png'):
+    (mac / name).symlink_to('../Resources/' + name)
 with (contents / 'Info.plist').open('wb') as f:
     plistlib.dump(dict(CFBundleExecutable='l2dtest', CFBundleIdentifier='com.l2dpet.desktop',
         CFBundleName='l2dpet', CFBundlePackageType='APPL', CFBundleShortVersionString=version,
@@ -67,14 +70,14 @@ for p in list(libs.iterdir()) + [mac/'l2dtest',mac/'l2dpet-ui']:
     for dep in deps(p):
         if not dep.startswith(('/usr/lib/','/System/Library/','@loader_path/','@rpath/')):
             raise RuntimeError(f'Non-portable dependency: {p}: {dep}')
-    subprocess.run(['codesign','--force','--sign','-',str(p)],check=True)
+    # Signing the main executable signs its enclosing bundle; do that last.
+    if p != mac / 'l2dtest':
+        subprocess.run(['codesign','--force','--sign','-',str(p)],check=True)
 subprocess.run(['codesign','--force','--sign','-',str(app)],check=True)
 subprocess.run(['codesign','--verify','--deep','--strict',str(app)],check=True)
 name = f'l2dpet-{version}-macos-{arch}-untested'
-with zipfile.ZipFile(out/(name+'.zip'), 'w', zipfile.ZIP_DEFLATED) as z:
-    for p in app.rglob('*'):
-        if p.is_file(): z.write(p, str(p.relative_to(out)))
-    z.writestr('TEST-BUILD.txt',note)
+# ditto preserves macOS bundle symlinks and executable permissions.
+subprocess.run(['ditto','-c','-k','--sequesterRsrc','--keepParent',str(app),str(out/(name+'.zip'))],check=True)
 with __import__('tempfile').TemporaryDirectory() as stage:
     stage = pathlib.Path(stage)
     shutil.copytree(app,stage/app.name)
