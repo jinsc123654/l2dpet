@@ -27,6 +27,25 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  sdk-check:
+    name: SDK 配置检查
+    if: vars.L2DPET_CSM_SDK == 'on' && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      ready: ${{ steps.config.outputs.ready }}
+    steps:
+      - id: config
+        env:
+          SDK_URL: ${{ secrets.L2DPET_CSM_SDK_URL }}
+        run: |
+          if [ -n "$SDK_URL" ]; then
+            echo 'ready=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'ready=false' >> "$GITHUB_OUTPUT"
+            echo '::notice::未配置 L2DPET_CSM_SDK_URL，跳过需要 SDK 的任务。'
+          fi
+
   # ---------------------------------------------------------------- 单测 + Python 回归
   tests:
     name: 单测与打包回归
@@ -168,11 +187,12 @@ jobs:
           desktop-file-validate scripts/linux-pack/l2dpet.desktop
 
   # ---------------------------------------------------------------- 完整打包（需 SDK）
-  # 默认跳过：设好仓库变量 L2DPET_CSM_SDK_URL（指向你能下载的 SDK zip）后，
+  # 默认跳过：设好 L2DPET_CSM_SDK=on 和 Secret L2DPET_CSM_SDK_URL 后，
   # 打 tag 或手动触发时执行。zip 顶层是 CubismSdkForNative-*/ 或直接是 Framework/ 都行。
   package-linux:
     name: 完整打包（Linux：tar.gz/deb/AppImage）
-    if: vars.L2DPET_CSM_SDK == 'on' && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/'))
+    needs: [tests, lint, x11-window, panel-linux, sdk-check]
+    if: needs.sdk-check.outputs.ready == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -185,12 +205,15 @@ jobs:
             build-essential cmake pkg-config rsync unzip dpkg-dev squashfs-tools file curl \
             libgl1-mesa-dev libx11-dev libxext-dev libxrender-dev libxft-dev \
             libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev \
-            libfreetype6-dev libfontconfig1-dev libcurl4-openssl-dev
+            libfreetype6-dev libfontconfig1-dev libcurl4-openssl-dev \
+            libglib2.0-dev libwayland-dev libwayland-bin wayland-protocols libxkbcommon-dev
 
       - name: 准备 Cubism SDK
+        env:
+          SDK_URL: ${{ secrets.L2DPET_CSM_SDK_URL }}
         run: |
           mkdir -p "$HOME/l2d-build/live2d-sdk"
-          curl -fL --retry 2 -o /tmp/cubism.zip "${{ secrets.L2DPET_CSM_SDK_URL }}"
+          curl -fL --retry 2 -o /tmp/cubism.zip "$SDK_URL"
           unzip -q /tmp/cubism.zip -d "$HOME/l2d-build/live2d-sdk"
           rm -f /tmp/cubism.zip
 
@@ -212,7 +235,8 @@ jobs:
 
   package-windows:
     name: 完整打包（Windows：便携目录 + 单文件）
-    if: vars.L2DPET_CSM_SDK == 'on' && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/'))
+    needs: [tests, lint, panel-windows, sdk-check]
+    if: needs.sdk-check.outputs.ready == 'true'
     runs-on: windows-latest
     timeout-minutes: 90
     defaults:
@@ -223,10 +247,16 @@ jobs:
 
       # windows_build.bat 自己会在 %USERPROFILE%\l2d-build\live2d-sdk 下找 CubismSdkForNative-*
       - name: 准备 Cubism SDK
+        env:
+          SDK_URL: ${{ secrets.L2DPET_CSM_SDK_URL }}
         run: |
           mkdir -p "$USERPROFILE/l2d-build/live2d-sdk"
-          curl -fL --retry 2 -o "$RUNNER_TEMP/cubism.zip" "${{ secrets.L2DPET_CSM_SDK_URL }}"
+          curl -fL --retry 2 -o "$RUNNER_TEMP/cubism.zip" "$SDK_URL"
           unzip -q "$RUNNER_TEMP/cubism.zip" -d "$USERPROFILE/l2d-build/live2d-sdk"
+          if [ -d "$USERPROFILE/l2d-build/live2d-sdk/Core" ]; then
+            printf 'CSM_SDK=%s\n' "$(cygpath -w "$USERPROFILE/l2d-build/live2d-sdk")" >> "$GITHUB_ENV"
+          fi
+          rm -f "$RUNNER_TEMP/cubism.zip"
 
       - name: 构建 + 打包
         run: cmd //c scripts\\windows_build.bat
@@ -244,16 +274,19 @@ jobs:
   # 用的还是仓库自带的 Cubism Core（含 macOS/arm64 静态库）；Framework 需要 SDK。
   player-macos:
     name: 主程序编译 + headless 渲染（macOS，需 SDK）
-    if: vars.L2DPET_CSM_SDK == 'on' && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/'))
+    needs: [tests, lint, macos, sdk-check]
+    if: needs.sdk-check.outputs.ready == 'true'
     runs-on: macos-latest
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v5
 
       - name: 准备 Cubism SDK
+        env:
+          SDK_URL: ${{ secrets.L2DPET_CSM_SDK_URL }}
         run: |
           mkdir -p "$HOME/l2d-build/live2d-sdk"
-          curl -fL --retry 2 -o "$RUNNER_TEMP/cubism.zip" "${{ secrets.L2DPET_CSM_SDK_URL }}"
+          curl -fL --retry 2 -o "$RUNNER_TEMP/cubism.zip" "$SDK_URL"
           unzip -q "$RUNNER_TEMP/cubism.zip" -d "$HOME/l2d-build/live2d-sdk"
 
       - name: 构建 l2dtest（macOS 端口）
