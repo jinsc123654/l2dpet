@@ -952,7 +952,7 @@ void Section(Pen& p, const std::string& id, const std::string& t)
     // 产品演示式小节头：渐变编号徽章 + 标题（"01 反应"）
     char n[8];
     std::snprintf(n, sizeof(n), "%02d", ++S.secN);
-    p.ui.rect(id + ".no.bg").position(p.x, p.y).size(34.0f, 24.0f).gradient(kBrandA, kBrandB, core::GradientDirection::Horizontal)
+    p.ui.rect(id + ".no.bg").position(p.x, p.y).size(34.0f, 24.0f).color(kViolet)
         .radius(12.0f).build();
     Text(p.ui, id + ".no", p.x, p.y + 3.0f, 34.0f, 18.0f, n, 12.0f, C(0xFFFFFF), 800, false, core::HorizontalAlign::Center);
     Text(p.ui, id, p.x + 44.0f, p.y + 1.0f, p.w - 44.0f, 24.0f, t, 16.0f, kText, 700);
@@ -992,7 +992,9 @@ void SliderRow(Pen& p, const std::string& id, const std::string& label, const ch
     const float sy = narrow ? p.y + 30.0f : p.y + 14.0f;
     const std::string k = key;
     p.ui.stack(id + ".s.wrap").position(sx, sy).size(std::max(80.0f, sw), 28.0f).content([&] {
-        components::slider(p.ui, id + ".s").theme(Th()).size(std::max(80.0f, sw), 28.0f)
+        components::SliderStyle sliderStyle(Th());
+        sliderStyle.knob = kViolet;
+        components::slider(p.ui, id + ".s").theme(Th()).style(sliderStyle).size(std::max(80.0f, sw), 28.0f)
             .value((v - lo) / (hi - lo))
             .onChange([k, lo, hi, step](float t) {
                 float val = lo + (hi - lo) * t;
@@ -1055,7 +1057,7 @@ void PageTitle(Pen& p, const std::string& t, const std::string& sub = "")
     Text(p.ui, "title", p.x, p.y, p.w, 40.0f, t, 30.0f, kText, 800);
     p.y += 44.0f;
     p.ui.rect("title.bar").position(p.x, p.y).size(44.0f, 4.0f)
-        .gradient(kBrandA, kBrandC, core::GradientDirection::Horizontal).radius(2.0f).build();
+        .color(kViolet).radius(2.0f).build();
     p.y += 14.0f;
     if (!sub.empty())
     {
@@ -1217,9 +1219,25 @@ void PageStatus(Pen& p)
         .gradient(eui::Color{ kBrandC.r, kBrandC.g, kBrandC.b, 0.0f }, eui::Color{ kBrandC.r, kBrandC.g, kBrandC.b, 0.85f },
                   core::GradientDirection::Horizontal)
         .radius(26.0f).build();
-    // 装饰光斑
-    p.ui.rect("hero.o1").position(hx + hw - 150.0f, hy - 60.0f).size(220.0f, 220.0f).color(C(0xFFFFFF, 0.10f)).radius(110.0f).build();
-    p.ui.rect("hero.o2").position(hx + hw * 0.38f, hy + heroH - 70.0f).size(120.0f, 120.0f).color(C(0xFFFFFF, 0.07f)).radius(60.0f).build();
+    // clip() 仅提供矩形 scissor；光晕用圆角矩形距离场遮罩，匹配背景 26px 圆角。
+    core::render::ShaderToyGraph decor;
+    decor.setUniform("cardSize", core::Vec2{hw, heroH});
+    decor.addInlinePass("Image", R"GLSL(
+void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+    vec2 p = fragCoord / iResolution.xy * cardSize;
+    p.y = cardSize.y - p.y;
+    vec2 q = abs(p - cardSize * 0.5) - (cardSize * 0.5 - vec2(26.0));
+    float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - 26.0;
+    float edge = max(fwidth(d), 0.001);
+    float mask = 1.0 - smoothstep(-edge, 0.0, d);
+    float d1 = length(p - vec2(cardSize.x - 40.0, 50.0)) - 110.0;
+    float d2 = length(p - vec2(cardSize.x * 0.38 + 60.0, cardSize.y - 10.0)) - 60.0;
+    float a1 = 0.10 * (1.0 - smoothstep(-fwidth(d1), fwidth(d1), d1));
+    float a2 = 0.07 * (1.0 - smoothstep(-fwidth(d2), fwidth(d2), d2));
+    fragColor = vec4(1.0, 1.0, 1.0, (a1 + a2 * (1.0 - a1)) * mask);
+}
+)GLSL", "");
+    p.ui.shadertoy("hero.decor").position(hx, hy).size(hw, heroH).graph(std::move(decor)).build();
     {
         const float x = hx + 28.0f;
         float y = hy + 24.0f;
@@ -1619,7 +1637,7 @@ void PageBehavior(Pen& p)
 {
     PageTitle(p, "行为", "她怎么反应、什么时候犯困、会不会主动找你");
     Section(p, "sec.react", "反应");
-    Card(p.ui, "react.card", p.x, p.y, p.w, 2 * ToggleH() + 2 * SliderH(p.w));
+    Card(p.ui, "react.card", p.x, p.y, p.w, 2 * ToggleH() + 3 * SliderH(p.w));
     ToggleRow(p, "t.lines", "即时台词气泡", "被戳、被摸时立刻冒一句（不等 LLM）", "lines");
     Divider(p.ui, "d1", p.x, p.y, p.w);
     ToggleRow(p, "t.native", "借用模型自带表情", "情绪强时套用模型里的开心/害羞/生气等表情", "native_expr");
@@ -1698,7 +1716,7 @@ void PageWindow(Pen& p)
 {
     PageTitle(p, "窗口", "桌宠窗口的显示方式（模型与能力见「模型」页）");
     Section(p, "sec.disp", "显示");
-    Card(p.ui, "disp.card", p.x, p.y, p.w, 3 * ToggleH() + 5 * SliderH(p.w));
+    Card(p.ui, "disp.card", p.x, p.y, p.w, 3 * ToggleH() + 4 * SliderH(p.w));
     SliderRow(p, "s.zoom", "大小（也可在角色上滚滚轮）", "zoom", 0.5f, 2.0f, 0.05f, [](float v) { return std::to_string((int)std::lround(v * 100)) + "%"; });
     Divider(p.ui, "d1", p.x, p.y, p.w);
     SliderRow(p, "s.op", "不透明度", "opacity", 0.2f, 1.0f, 0.05f, [](float v) { return std::to_string((int)std::lround(v * 100)) + "%"; });

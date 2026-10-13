@@ -269,8 +269,7 @@ jobs:
             dist/l2dpet-portable-x64.exe
           if-no-files-found: error
 
-  # macOS 目前没有打包脚本（README 里 macOS 只提供构建支持），所以这个任务只验证
-  # "主程序能编出来 + 能跑一帧"：headless 端口不需要 WindowServer，CI 里跑得起来。
+  # macOS 生成 .app ZIP 与 DMG；未经实机验证，headless 仅验证渲染。
   # 用的还是仓库自带的 Cubism Core（含 macOS/arm64 静态库）；Framework 需要 SDK。
   player-macos:
     name: 主程序编译 + headless 渲染（macOS，需 SDK）
@@ -289,8 +288,8 @@ jobs:
           curl -fL --retry 2 -o "$RUNNER_TEMP/cubism.zip" "$SDK_URL"
           unzip -q "$RUNNER_TEMP/cubism.zip" -d "$HOME/l2d-build/live2d-sdk"
 
-      - name: 构建 l2dtest（macOS 端口）
-        run: bash live2d/build-player.sh host
+      - name: 构建与打包 macOS（未经实机验证）
+        run: bash scripts/macos_build.sh
 
       - name: headless 渲染冒烟（真实模型 → 真实帧）
         run: |
@@ -302,3 +301,11 @@ jobs:
           test -n "$(find "$frames" -name '*.ppm' -print -quit)" \
             || { echo '播放器退出但没产出任何帧' >&2; exit 1; }
           echo "渲染帧：$(find "$frames" -name '*.ppm' | wc -l) 张"
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: l2dpet-macos-untested-${{ github.sha }}
+          path: |
+            dist/macos-*/*.zip
+            dist/macos-*/*.dmg
+          if-no-files-found: error
