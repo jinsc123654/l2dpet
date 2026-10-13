@@ -2,6 +2,9 @@
 #include "../player/src/Platform.h"
 #include <cstdlib>
 #include <sstream>
+#if defined(__linux__)
+#include <unistd.h>
+#endif
 #if defined(_WIN32)
 #include <windows.h>
 #include <shlobj.h>
@@ -33,6 +36,7 @@ static std::string AutostartTarget()
 #if defined(_WIN32)
     return dir + "l2dtest.exe";
 #else
+    if (plat::IsFile(dir + "l2dpet")) return dir + "l2dpet";
     return dir + "l2dtest";
 #endif
 }
@@ -160,6 +164,9 @@ bool SetAutostart(bool on)
     }
     const std::string target = AutostartTarget();
     if (target.empty()) return false;
+#if defined(__linux__)
+    if (target[0] != '/' || access(target.c_str(), X_OK) != 0) return false;
+#endif
     const size_t slash = path.find_last_of('/');
     if (slash != std::string::npos && !plat::CreateDir(path.substr(0, slash), true)) return false;
     std::string entry;
@@ -169,8 +176,27 @@ bool SetAutostart(bool on)
     entry += "Name[zh_CN]=Live2D 桌宠\n";
     entry += "Comment=Start the desktop pet at login\n";
     entry += "Comment[zh_CN]=登录后自动启动桌宠\n";
-    entry += "Exec=" + AutostartExec(target) + "\n";
+    std::string command = AutostartExec(target);
+    const size_t targetSlash = target.find_last_of('/');
+    const std::string basename = target.substr(targetSlash == std::string::npos ? 0 : targetSlash + 1);
+    // Build/folder fallback must enter desktop-pet mode, rather than the bare player's defaults.
+    if (basename == "l2dtest") command += " --pet";
+    entry += "Exec=" + command + "\n";
+    if (targetSlash != std::string::npos)
+    {
+        const std::string dir = targetSlash == 0 ? "/" : target.substr(0, targetSlash);
+        std::string escaped;
+        for (char c : dir)
+        {
+            if (c == '\\') escaped += "\\\\";
+            else if (c == '\n') escaped += "\\n";
+            else if (c == '\t') escaped += "\\t";
+            else escaped += c;
+        }
+        entry += "Path=" + escaped + "\n";
+    }
     entry += "Terminal=false\n";
+    entry += "StartupNotify=false\n";
     entry += "X-GNOME-Autostart-enabled=true\n";
     return plat::WritePrivateFile(path, entry) && plat::Exists(path);
 }

@@ -211,6 +211,7 @@ cmd_start() {
     # 集成放在"已经在跑了"的早退**之前**：否则机器上已有实例时（比如刚重起过、或 AppImage
     # 被移动后用户又点了一次）走不到这里，菜单项就一直指着旧路径。
     auto_integrate || die "创建桌面入口失败：请检查用户目录权限"
+    repair_appimage_autostart
     running=$(pids | head -n 1)
     if [ -n "$running" ]; then
         say "已经在跑了（pid $running）——要重起用：l2dpet restart"
@@ -424,7 +425,8 @@ desktop_template() {
 
 # 从 .desktop 里取"怎么启动本应用"（装了就用装好的入口，没装就用当前这份）
 self_exec() {
-    if [ -n "${APPIMAGE:-}" ]; then printf '%s\n' "$INST_PREFIX/l2dpet.AppImage"; return 0; fi
+    # A directly launched AppImage need not be installed; keep the actual persistent file.
+    if [ -n "${APPIMAGE:-}" ]; then printf '%s\n' "$APPIMAGE"; return 0; fi
     if [ -x "$DIR/l2dpet" ]; then printf '%s\n' "$DIR/l2dpet"; return 0; fi
     printf '%s\n' "$BIN"
 }
@@ -469,6 +471,22 @@ cmd_dock() {            # GNOME 收藏夹（其它桌面环境打印手动固定
     else
         say "不是 GNOME（或没有 gsettings）——手动固定：应用菜单里右键本应用 → 固定/添加到收藏夹"
     fi
+}
+
+# Migrate only the known broken standalone-AppImage entry; respect disabled entries.
+repair_appimage_autostart() {
+    [ -n "${APPIMAGE:-}" ] && [ -x "$APPIMAGE" ] || return 0
+    legacy=$INST_PREFIX/l2dpet.AppImage
+    [ ! -x "$legacy" ] || return 0
+    case ${XDG_CONFIG_HOME:-} in
+        /*) startup_dir=$XDG_CONFIG_HOME/autostart ;;
+        *) startup_dir=$HOME/.config/autostart ;;
+    esac
+    entry=$startup_dir/l2dpet.desktop
+    [ -f "$entry" ] || return 0
+    grep -Eq '^(Hidden=true|X-GNOME-Autostart-enabled=false)' "$entry" && return 0
+    grep -qxF "Exec=$(desktop_entry_exec "$legacy")" "$entry" || return 0
+    cmd_autostart on
 }
 
 cmd_autostart() {       # 登录自启 on/off
@@ -545,6 +563,8 @@ EOF
         *":$BINDIR:"*) ;;
         *) say "注意：$BINDIR 不在 PATH 里——加一句 export PATH=\"\$PATH:$BINDIR\"，或直接用 $BINDIR/l2dpet" ;;
     esac
+    APPIMAGE=$INST_PREFIX/l2dpet.AppImage
+    export APPIMAGE
     cmd_install_icons "$INST_PREFIX/l2dpet.AppImage" "$INST_PREFIX/l2dpet.png"
     say "应用菜单项已装（搜 \"Live2D\" 或 \"桌宠\"）"
     [ "$DESKICON" = "1" ] && cmd_desktop_icon

@@ -411,7 +411,11 @@ if [ "$MAKE_APPIMAGE" = "1" ]; then
                 p=$(printf '%s\n' "$_ldcfg" | awk -v n="$w" '$1 == n && !d { print $NF; d = 1 }')
             fi
             # 同理：不能写 `[ -n "$p" ] && printf ...`（循环体最后返回 1 也会被 set -e 干掉）
-            if [ -n "$p" ]; then printf '%s\n' "$p" >>"$_libs"; fi
+            if [ -n "$p" ]; then
+                printf '%s\n' "$p" >>"$_libs"
+                # dlopen roots need their transitive dependencies too (e.g. Wayland's libffi).
+                ldd "$p" 2>/dev/null | awk '$3 ~ /^\// { print $3 }' >>"$_libs"
+            fi
         done
         sort -u -o "$_libs" "$_libs"
     fi
@@ -419,7 +423,7 @@ if [ "$MAKE_APPIMAGE" = "1" ]; then
     while read -r lib; do
         base=$(basename "$lib")
         case $base in
-            ld-linux*|libc.so*|libm.so*|libpthread*|libdl*|librt*|libresolv*|libnss_*|libutil*|libanl*|libcrypt*) continue ;;
+            ld-linux*|libc.so*|libm.so*|libpthread.so*|libdl.so*|librt.so*|libresolv.so*|libnss_*|libutil.so*|libanl.so*|libcrypt.so*) continue ;;
             libgcc_s.so*|libstdc++.so*) continue ;;
             libGL.so*|libEGL*|libGLX*|libGLdispatch*|libOpenGL*|libGLES*|libvulkan*|libnvidia*) continue ;;
         esac
@@ -427,6 +431,20 @@ if [ "$MAKE_APPIMAGE" = "1" ]; then
     done <"$_libs"
     rm -f "$_libs"
     say "  带 $nlib 个依赖（$(du -sh "$APPDIR/usr/lib" | cut -f1)）；glibc/编译器/显卡驱动仍用宿主的"
+    # Shell-only status checks never load the actual ELF programs, so they miss ABI failures.
+    python3 "$ROOT/scripts/check_appimage_deps.py" "$APPDIR" || die "AppImage ELF 依赖闭包不完整"
+    for binary in "$APPDIR/usr/bin/l2dtest" "$APPDIR/usr/bin/l2dpet-ui"; do
+        if ! LC_ALL=C LD_LIBRARY_PATH="$APPDIR/usr/lib" ldd -r "$binary" >"$STAGE_ROOT/.elf-check.txt" 2>&1; then
+            cat "$STAGE_ROOT/.elf-check.txt" >&2
+            die "AppImage 程序动态加载检查失败"
+        fi
+        if grep -Eq 'not found|undefined symbol' "$STAGE_ROOT/.elf-check.txt"; then
+            cat "$STAGE_ROOT/.elf-check.txt" >&2
+            die "AppImage 程序存在缺失库、符号或版本"
+        fi
+    done
+    rm -f "$STAGE_ROOT/.elf-check.txt"
+    say "  [自检] 实际播放器/面板 ELF 依赖与符号解析 ✓"
 
     cat >"$APPDIR/AppRun" <<'APPRUN'
 #!/bin/sh

@@ -48,6 +48,7 @@
 #include <ApplicationServices/ApplicationServices.h>
 #else
 #include <X11/Xlib.h>
+#include "X11WindowPolicy.h"
 #include <X11/Xatom.h>
 #include <X11/extensions/shape.h>
 #include <X11/keysym.h>
@@ -648,9 +649,8 @@ bool PortGlfwPet::Initialize(const PortConfig& cfg)
         const Window xw = glfwGetX11Window(_win);
         if (dpy != NULL && xw != 0)
         {
-            const Atom type = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE", False);
-            const Atom normal = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_NORMAL", False);
-            XChangeProperty(dpy, xw, type, XA_ATOM, 32, PropModeReplace, (unsigned char*)&normal, 1);
+            x11pet::ModelType(dpy, xw, _appliedTop);
+            x11pet::NoFocusOnMap(dpy, xw);
             const Atom state = XInternAtom(dpy, "_NET_WM_STATE", False);
             Atom states[3] = { XInternAtom(dpy, "_NET_WM_STATE_SKIP_TASKBAR", False),
                                XInternAtom(dpy, "_NET_WM_STATE_SKIP_PAGER", False),
@@ -1096,7 +1096,14 @@ void PortGlfwPet::ApplySavedPlacement()
     if (nx == _winX && ny == _winY) return;
     _winX = nx;
     _winY = ny;
+#if defined(__linux__)
+    Display* dpy = glfwGetX11Display();
+    const Window xw = glfwGetX11Window(_win);
+    if (dpy != NULL && xw != 0) x11pet::RestorePosition(dpy, xw, _winX, _winY);
+    else glfwSetWindowPos(_win, _winX, _winY);
+#else
     glfwSetWindowPos(_win, _winX, _winY);
+#endif
     _shapeCountdown = 0;   // 位置变了：输入区域下一帧重算
     _anchorOk = false;     // 气泡锚点跟着重算
     fprintf(stderr, "[glfwpet] 还原存档位置 → %d,%d\n", _winX, _winY);   // stderr：GUI 子系统构建下 stdout 会丢
@@ -1333,7 +1340,21 @@ void PortGlfwPet::RefreshFromState()
             {
                 _appliedTop = v;
                 glfwSetWindowAttrib(_win, GLFW_FLOATING, v ? GLFW_TRUE : GLFW_FALSE);
-                if (_bw != NULL) glfwSetWindowAttrib(_bw, GLFW_FLOATING, v ? GLFW_TRUE : GLFW_FALSE);
+#if defined(__linux__)
+                Display* modelDpy = glfwGetX11Display();
+                const Window modelXw = glfwGetX11Window(_win);
+                if (modelDpy != NULL && modelXw != 0) x11pet::ModelType(modelDpy, modelXw, v);
+#endif
+                if (_bw != NULL)
+                {
+                    glfwSetWindowAttrib(_bw, GLFW_FLOATING, v ? GLFW_TRUE : GLFW_FALSE);
+#if defined(__linux__)
+                    Display* dpy = glfwGetX11Display();
+                    const Window xw = glfwGetX11Window(_bw);
+                    if (dpy != NULL && xw != 0)
+                        x11pet::BubbleHints(dpy, xw, glfwGetX11Window(_win), v);
+#endif
+                }
                 fprintf(stderr, "[glfwpet] top=%d (model+bubble)\n", (int)v);
             }
         }
@@ -1609,10 +1630,7 @@ bool PortGlfwPet::EnsureBubbleWindow(int w, int h)
         const Window xw = glfwGetX11Window(_bw);
         if (dpy != NULL && xw != 0)
         {
-            const Atom type = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE", False);
-            const Atom normal = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_NORMAL", False);
-            XChangeProperty(dpy, xw, type, XA_ATOM, 32, PropModeReplace, (unsigned char*)&normal, 1);
-            XSetTransientForHint(dpy, xw, glfwGetX11Window(_win));
+            x11pet::BubbleHints(dpy, xw, glfwGetX11Window(_win), _appliedTop);
             const Atom state = XInternAtom(dpy, "_NET_WM_STATE", False);
             Atom states[3] = { XInternAtom(dpy, "_NET_WM_STATE_SKIP_TASKBAR", False),
                                XInternAtom(dpy, "_NET_WM_STATE_SKIP_PAGER", False),
@@ -2001,6 +2019,11 @@ void PortGlfwPet::BubbleTick()
     {
         glfwSetWindowPos(_bw, _bubX, _bubY);
         glfwSetWindowSize(_bw, _bubW, _bubH);
+#if defined(__linux__)
+        Display* dpy = glfwGetX11Display();
+        const Window xw = glfwGetX11Window(_bw);
+        if (dpy != NULL && xw != 0) x11pet::NoFocusOnMap(dpy, xw);
+#endif
         glfwShowWindow(_bw);
         _bubMapped = true;
     }

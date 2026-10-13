@@ -140,6 +140,56 @@ class PackagingTests(unittest.TestCase):
         self.run_cmd("sh", str(wrapper), "after move")
         self.assertEqual((self.base / "args.json").read_text(), "after move")
 
+    def test_uninstalled_appimage_autostart_uses_actual_file(self):
+        import configparser
+        image = self.base / "standalone pet.AppImage"
+        image.write_text('#!/bin/sh\nprintf "%s" "$1" > "$CAPTURE"\n')
+        image.chmod(0o755)
+        env = dict(self.env, APPIMAGE=str(image), APPDIR=str(self.pkg))
+        self.run_cmd("sh", str(self.pkg / "l2dpet"), "autostart", "on", env=env)
+        entry = self.home / ".config/autostart/l2dpet.desktop"
+        parser = configparser.ConfigParser(interpolation=None)
+        parser.read(entry)
+        self.assertIn(str(image), parser["Desktop Entry"]["Exec"])
+        self.assertNotIn(".local/opt/l2dpet/l2dpet.AppImage", parser["Desktop Entry"]["Exec"])
+        self.assertFalse((self.home / ".local/opt/l2dpet/l2dpet.AppImage").exists())
+        if shutil.which("gio"):
+            self.run_cmd("gio", "launch", str(entry), env=env)
+            for _ in range(50):
+                if (self.base / "args.json").exists(): break
+                time.sleep(0.1)
+            self.assertTrue((self.base / "args.json").exists())
+
+    def test_start_repairs_only_known_broken_appimage_autostart(self):
+        image = self.base / "standalone.AppImage"
+        image.write_text('#!/bin/sh\nexit 0\n')
+        image.chmod(0o755)
+        env = dict(self.env, APPIMAGE=str(image), APPDIR=str(self.pkg), L2DPET_DRY_RUN="1")
+        self.run_cmd("sh", str(self.pkg / "l2dpet"), "autostart", "on", env=env)
+        entry = self.home / ".config/autostart/l2dpet.desktop"
+        legacy = self.home / ".local/opt/l2dpet/l2dpet.AppImage"
+        old_exec = self.run_cmd("sh", "-c", '. "$1"; desktop_entry_exec "$2"', "sh",
+                                str(self.pkg / "desktop-entry.sh"), str(legacy)).stdout.strip()
+        old = re.sub(r"^Exec=.*$", lambda _: "Exec=" + old_exec, entry.read_text(), flags=re.M)
+        entry.write_text(old)
+        self.run_cmd("sh", str(self.pkg / "l2dpet"), env=env)
+        self.assertIn(str(image), entry.read_text())
+        self.assertNotIn(".local/opt/l2dpet/l2dpet.AppImage", entry.read_text())
+        disabled = old + "Hidden=true\n"
+        entry.write_text(disabled)
+        self.run_cmd("sh", str(self.pkg / "l2dpet"), env=env)
+        self.assertEqual(entry.read_text(), disabled)
+
+    def test_installed_appimage_autostart_uses_installed_copy(self):
+        image = self.base / "source.AppImage"
+        image.write_text('#!/bin/sh\nexit 0\n')
+        image.chmod(0o755)
+        env = dict(self.env, APPIMAGE=str(image), APPDIR=str(self.pkg))
+        self.run_cmd("sh", str(self.pkg / "l2dpet"), "install", "--autostart", env=env)
+        entry = self.home / ".config/autostart/l2dpet.desktop"
+        self.assertIn(".local/opt/l2dpet/l2dpet.AppImage", entry.read_text())
+        self.assertNotIn(str(image), entry.read_text())
+
     def test_appimage_does_not_overwrite_existing_install(self):
         self.install()
         installed = self.home / ".local/opt/l2dpet/l2dpet"
@@ -153,6 +203,41 @@ class PackagingTests(unittest.TestCase):
         self.assertTrue((self.home / ".local/bin/l2dpet").is_symlink())
         self.assertEqual(installed.read_bytes(), before)
         self.assertEqual(desktop.read_bytes(), entry_before)
+
+    def test_appimage_dependency_check_rejects_prefix_collision_omissions(self):
+        appdir = self.base / "AppDir"
+        libs = appdir / "usr/lib"
+        bins = appdir / "usr/bin"
+        libs.mkdir(parents=True)
+        bins.mkdir(parents=True)
+        crypto = self.base / "crypto.c"
+        crypto.write_text("int crypto_fixture(void) { return 42; }\n")
+        ssl = self.base / "ssl.c"
+        ssl.write_text("extern int crypto_fixture(void); int ssl_fixture(void) { return crypto_fixture(); }\n")
+        main = self.base / "main.c"
+        main.write_text("int main(void) { return 0; }\n")
+        self.run_cmd("cc", "-shared", "-fPIC", "-Wl,-soname,libcrypto.so.3", str(crypto),
+                     "-o", str(libs / "libcrypto.so.3"))
+        self.run_cmd("cc", "-shared", "-fPIC", "-Wl,-soname,libssl.so.3", str(ssl),
+                     "-L" + str(libs), "-l:libcrypto.so.3", "-o", str(libs / "libssl.so.3"))
+        self.run_cmd("cc", str(main), "-o", str(bins / "l2dtest"))
+        shutil.copyfile(bins / "l2dtest", bins / "l2dpet-ui")
+        rtmp = self.base / "rtmp.c"
+        rtmp.write_text("int rtmp_fixture(void) { return 1; }\n")
+        curl = self.base / "curl.c"
+        curl.write_text("extern int rtmp_fixture(void); int curl_fixture(void) { return rtmp_fixture(); }\n")
+        self.run_cmd("cc", "-shared", "-fPIC", "-Wl,-soname,librtmp.so.1", str(rtmp),
+                     "-o", str(libs / "librtmp.so.1"))
+        self.run_cmd("cc", "-shared", "-fPIC", "-Wl,-soname,libcurl.so.4", str(curl),
+                     "-L" + str(libs), "-l:librtmp.so.1", "-o", str(libs / "libcurl.so.4"))
+        validator = ROOT / "scripts/check_appimage_deps.py"
+        self.run_cmd("python3", str(validator), str(appdir))
+        (libs / "libcrypto.so.3").unlink()
+        (libs / "librtmp.so.1").unlink()
+        result = self.run_cmd("python3", str(validator), str(appdir), check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("libssl.so.3 requires bundled libcrypto.so.3", result.stdout)
+        self.assertIn("libcurl.so.4 requires bundled librtmp.so.1", result.stdout)
 
     def test_windows_payload_key_tracks_same_size_changes_and_names(self):
         payload = self.base / "payload"
