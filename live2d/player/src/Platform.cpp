@@ -34,6 +34,7 @@
 #if defined(__APPLE__)
 #include <mach-o/dyld.h>
 #include <mach/mach_time.h>
+#include <crt_externs.h>   // _NSGetEnviron：Apple 的 <unistd.h> 不声明 environ
 #endif
 #endif
 
@@ -534,8 +535,13 @@ long SpawnDetached(const std::string& exe, const std::vector<std::string>& args,
     posix_spawn_file_actions_t fa;
     posix_spawn_file_actions_init(&fa);
     if (!workdir.empty()) posix_spawn_file_actions_addchdir_np(&fa, workdir.c_str());
+#if defined(__APPLE__)
+    char** const envp = *_NSGetEnviron();   // 见文件顶部的 crt_externs.h
+#else
+    char** const envp = environ;
+#endif
     pid_t pid = -1;
-    const int rc = posix_spawn(&pid, exe.c_str(), &fa, NULL, argv.data(), environ);
+    const int rc = posix_spawn(&pid, exe.c_str(), &fa, NULL, argv.data(), envp);
     posix_spawn_file_actions_destroy(&fa);
     return rc == 0 ? (long)pid : -1;
 #endif

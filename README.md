@@ -125,7 +125,8 @@ sudo apt-get update
 sudo apt-get install -y build-essential cmake pkg-config rsync unzip \
   libgl1-mesa-dev libx11-dev libxext-dev libxrender-dev libxft-dev \
   libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev \
-  libfreetype6-dev libfontconfig1-dev libcurl4-openssl-dev
+  libfreetype6-dev libfontconfig1-dev libcurl4-openssl-dev \
+  libglib2.0-dev libwayland-dev libwayland-bin wayland-protocols libxkbcommon-dev
 ```
 
 准备 SDK 后构建并打包：

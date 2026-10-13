@@ -33,7 +33,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: 依赖
         run: |
@@ -61,14 +61,15 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: 依赖
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential pkg-config xvfb xauth dbus-x11 gnome-shell \
-            libxft-dev libfontconfig1-dev libgl1-mesa-dri libgl1 libegl1 libgles2
+            libx11-dev libxext-dev libxft-dev libfontconfig1-dev \
+            libgl1-mesa-dri libgl1 libegl1 libgles2
 
       - name: 窗口行为测试
         run: bash scripts/test_linux_windows.sh
@@ -81,15 +82,16 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: 依赖
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential cmake pkg-config \
+            build-essential cmake pkg-config libcurl4-openssl-dev libglib2.0-dev \
             libgl1-mesa-dev libx11-dev libxrandr-dev libxinerama-dev \
-            libxcursor-dev libxi-dev
+            libxcursor-dev libxi-dev libxext-dev \
+            libwayland-dev libwayland-bin wayland-protocols libxkbcommon-dev
 
       - name: 构建 l2dpet-ui
         run: bash live2d/build-panel.sh
@@ -108,7 +110,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: 构建 l2dpet-ui
         run: bash live2d/build-panel-win.sh
@@ -125,7 +127,7 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: 玩家单测（编译 + 运行）
         run: bash live2d/player/tests/run_all.sh
@@ -146,7 +148,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Shell 语法
         run: |
@@ -174,7 +176,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: 依赖
         run: |
@@ -199,7 +201,7 @@ jobs:
       - name: Ubuntu 24.04 容器实测（libc/SSL 装不进 AppImage 的那类问题）
         run: bash scripts/test_appimage_ubuntu24.sh dist/linux-x86_64/l2dpet-*-linux-*.AppImage
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: l2dpet-linux-${{ github.sha }}
           path: |
@@ -217,7 +219,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # windows_build.bat 自己会在 %USERPROFILE%\l2d-build\live2d-sdk 下找 CubismSdkForNative-*
       - name: 准备 Cubism SDK
@@ -229,7 +231,7 @@ jobs:
       - name: 构建 + 打包
         run: cmd //c scripts\\windows_build.bat
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: l2dpet-windows-${{ github.sha }}
           path: |
@@ -246,7 +248,7 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: 准备 Cubism SDK
         run: |

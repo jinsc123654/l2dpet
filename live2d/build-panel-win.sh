@@ -43,7 +43,9 @@ cmake -S "$SCRIPT_DIR/panel" -B "$BUILD_DIR" -A x64 \
       -DCMAKE_BUILD_TYPE=Release \
       -DEUI_DEPS_MODE=auto \
       -DEUI_NEO_DIR="$(cygpath -m "$EUI_NEO")"
-cmake --build "$BUILD_DIR" --config Release --target l2dpet-ui --parallel "$(nproc 2>/dev/null || echo 4)" -- /p:MultiProcessorCompilation=true
+# MSBuild 开关用 -p: 而不是 /p:：Git Bash（MSYS）会把 / 开头的参数当路径转换，
+# 到 msbuild 手里就变成 "MSB1008: Only one project can be specified"（CI 上踩过）。
+cmake --build "$BUILD_DIR" --config Release --target l2dpet-ui --parallel "$(nproc 2>/dev/null || echo 4)" -- -p:MultiProcessorCompilation=true
 
 echo
 echo "产物:"
