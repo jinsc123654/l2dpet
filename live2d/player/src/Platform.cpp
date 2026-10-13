@@ -469,6 +469,9 @@ bool ReapChild(long pid, bool* exited, int* status)
 bool WaitChildExit(long pid, int timeoutMs, bool stopOnTimeout, int* exitCode)
 {
     if (exitCode != NULL) *exitCode = -1;
+    // pid <= 0 是无效句柄：POSIX 侧 waitpid(-1) 会变成"等任意子进程"，超时分支的 kill(-1)
+    // 更是会波及整个会话（spawn 失败没查返回值时就是这样）。
+    if (pid <= 0) return false;
 #if defined(_WIN32)
     HANDLE h = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | (stopOnTimeout ? PROCESS_TERMINATE : 0), FALSE, (DWORD)pid);
     if (h == NULL) return !stopOnTimeout;
