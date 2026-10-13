@@ -309,3 +309,37 @@ jobs:
             dist/macos-*/*.zip
             dist/macos-*/*.dmg
           if-no-files-found: error
+
+  release:
+    name: 发布 GitHub Release
+    needs: [package-linux, package-windows, player-macos]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: l2dpet-*
+          path: release-assets
+          merge-multiple: true
+      - name: 整理发布文件
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          mkdir publish
+          find release-assets -type f \( -name '*.AppImage' -o -name '*.deb' -o -name '*.tar.gz' -o -name '*.dmg' -o -name '*macos*.zip' -o -name 'l2dpet-portable-x64.exe' \) -exec cp {} publish/ \;
+          if [ -d release-assets/windows-x64 ]; then
+            (cd release-assets && zip -qr "../publish/l2dpet-${RELEASE_TAG#v}-windows-x64.zip" windows-x64)
+          else
+            echo 'Windows 便携目录缺失'; exit 1
+          fi
+          (cd publish && sha256sum * > SHA256SUMS.txt)
+      - name: 发布安装包
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$RELEASE_TAG" publish/* --verify-tag \
+            --title "l2dpet $RELEASE_TAG" --notes-file docs/RELEASE-1.0.4.md

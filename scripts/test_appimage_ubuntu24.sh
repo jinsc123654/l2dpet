@@ -3,7 +3,7 @@
 set -euo pipefail
 if [ "${1:-}" != "--inside-container" ]; then
     ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-    PACKAGE=${1:-$ROOT/dist/linux-x86_64/l2dpet-1.0.3-linux-x86_64.AppImage}
+    PACKAGE=${1:-$ROOT/dist/linux-x86_64/l2dpet-$(tr -d '{}\n \t' <"$ROOT/version.txt")-linux-x86_64.AppImage}
     PACKAGE_DIR=$(cd "$(dirname "$PACKAGE")" && pwd)
     docker run --rm \
         --mount "type=bind,source=$PACKAGE_DIR,target=/packages,readonly" \
