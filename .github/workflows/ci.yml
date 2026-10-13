@@ -1,0 +1,269 @@
+# CI — 构建与验证
+#
+# 设计前提：**Cubism SDK 不在仓库里**（授权所限，本地从 live2d.com 下载），所以默认任务
+# 全部走"不需要 SDK"的那部分：
+#   · 玩家逻辑单测（15 个独立 C++ 测试 + 2 个协议测试）—— 见 live2d/player/tests/run_all.sh
+#   · X11 窗口行为（Xvfb + GNOME 会话，脚本自带隔离 HOME/会话）
+#   · 面板 l2dpet-ui 的**真实编译**（EUI-NEO 及三方都在仓库里，Linux/Windows/macOS 都不需要 SDK）
+#   · 打包类回归 + 桌面启动适配 + 协议（Python，全是临时 fixture，不碰用户目录）
+#   · 脚本语法 / Python 语法 / .desktop 合法性
+#   · macOS（Apple Silicon）：单测 + 面板构建
+#
+# 完整打包（桌宠 + 面板 + tar.gz/deb/AppImage、Windows 便携包、macOS 编译+渲染冒烟）需要 SDK，
+# 两步都配好才会跑（打 tag 或手动触发时）：
+#   · 仓库变量  L2DPET_CSM_SDK=on          —— 开关，公开的，不含秘密
+#   · 仓库 Secret L2DPET_CSM_SDK_URL=<zip 地址> —— 真正的下载地址
+# 为什么要拆成两个：公开仓库的**变量**值会原样出现在日志里（等于把 SDK 链接公开），
+# Secret 才会被打码。缺任一项时 package-* / player-macos 任务跳过。
+name: CI
+
+on:
+  push:                # 所有分支；不带过滤器时 tag push 也触发（tag 才会跑打包任务）
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------- 单测 + Python 回归
+  tests:
+    name: 单测与打包回归
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake libcurl4-openssl-dev rsync unzip \
+            desktop-file-utils libglib2.0-bin
+
+      # 15 个 C++ 测试逐个编译并运行（每个用临时 HOME）
+      - name: 玩家单测（编译 + 运行）
+        run: bash live2d/player/tests/run_all.sh
+
+      # 打包器 / 桌面启动适配 / 外部接入协议
+      - name: 打包与启动回归
+        run: |
+          python3 scripts/test_packaging.py
+          python3 scripts/test_desktop_startup.py
+          python3 live2d/tools/test_pet_bridge.py
+
+  # ---------------------------------------------------------------- X11 窗口行为
+  # 真 X11 会话 + GNOME 窗口管理器（Xvfb 里起）：验证点击穿透/置顶/气泡层级这些
+  # 只看代码看不出来的行为。gnome-shell 用软件渲染（脚本里已设 LIBGL_ALWAYS_SOFTWARE=1）。
+  x11-window:
+    name: X11 窗口行为（Xvfb + GNOME）
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config xvfb xauth dbus-x11 gnome-shell \
+            libxft-dev libfontconfig1-dev libgl1-mesa-dri libgl1 libegl1 libgles2
+
+      - name: 窗口行为测试
+        run: bash scripts/test_linux_windows.sh
+
+  # ---------------------------------------------------------------- 面板：真实构建
+  # l2dpet-ui 不依赖 Cubism SDK，两个平台都能在 CI 里编出来；这同时覆盖了仓库里
+  # 面板与 Platform.cpp 那部分源码的编译健康度。
+  panel-linux:
+    name: 面板构建（Linux）
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake pkg-config \
+            libgl1-mesa-dev libx11-dev libxrandr-dev libxinerama-dev \
+            libxcursor-dev libxi-dev
+
+      - name: 构建 l2dpet-ui
+        run: bash live2d/build-panel.sh
+
+      - name: 产物检查
+        run: |
+          file "$HOME/l2d-build/build-panel/l2dpet-ui"
+          test -f "$HOME/l2d-build/build-panel/l2dpet.png"
+          test -f "$HOME/l2d-build/build-panel/l2dpet-logo.png"
+
+  panel-windows:
+    name: 面板构建（Windows / MSVC）
+    runs-on: windows-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 构建 l2dpet-ui
+        run: bash live2d/build-panel-win.sh
+
+      - name: 产物检查
+        run: ls -la "$USERPROFILE/l2d-build/build-panel-win/Release/l2dpet-ui.exe"
+
+  # ---------------------------------------------------------------- macOS
+  # 单测 + 面板都跑在 Apple Silicon runner 上（macos-latest 现在是 arm64；Intel 标签已退役）。
+  # 这是 macOS 端第一次有"真机"验证——README 里写的"尚未完成实机验证"从此有 CI 顶着。
+  # 面板的目录选择器在 macOS 还没接（app.cpp 里 NSOpenPanel 是 TODO），但编译与其余 UI 正常。
+  macos:
+    name: 单测 + 面板构建（macOS / Apple Silicon）
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 玩家单测（编译 + 运行）
+        run: bash live2d/player/tests/run_all.sh
+
+      - name: 面板构建
+        run: |
+          command -v cmake >/dev/null || brew install cmake
+          bash live2d/build-panel.sh
+
+      - name: 产物检查
+        run: |
+          file "$HOME/l2d-build/build-panel/l2dpet-ui"
+          test -f "$HOME/l2d-build/build-panel/l2dpet.png"
+
+  # ---------------------------------------------------------------- 静态检查
+  lint:
+    name: 脚本与资源检查
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Shell 语法
+        run: |
+          for f in scripts/*.sh live2d/*.sh live2d/tools/*.sh \
+                   live2d/player/tests/*.sh scripts/linux-pack/*.sh; do
+            bash -n "$f"
+          done
+          bash -n scripts/linux-pack/l2dpet   # 启动器是 /bin/sh 脚本，同样过一遍
+
+      - name: Python 语法
+        run: python3 -m py_compile scripts/*.py live2d/tools/*.py live2d/player/tests/*.py
+
+      - name: .desktop 合法性
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y desktop-file-utils
+          desktop-file-validate scripts/linux-pack/l2dpet.desktop
+
+  # ---------------------------------------------------------------- 完整打包（需 SDK）
+  # 默认跳过：设好仓库变量 L2DPET_CSM_SDK_URL（指向你能下载的 SDK zip）后，
+  # 打 tag 或手动触发时执行。zip 顶层是 CubismSdkForNative-*/ 或直接是 Framework/ 都行。
+  package-linux:
+    name: 完整打包（Linux：tar.gz/deb/AppImage）
+    if: vars.L2DPET_CSM_SDK == 'on' && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake pkg-config rsync unzip dpkg-dev squashfs-tools file curl \
+            libgl1-mesa-dev libx11-dev libxext-dev libxrender-dev libxft-dev \
+            libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev \
+            libfreetype6-dev libfontconfig1-dev libcurl4-openssl-dev
+
+      - name: 准备 Cubism SDK
+        run: |
+          mkdir -p "$HOME/l2d-build/live2d-sdk"
+          curl -fL --retry 2 -o /tmp/cubism.zip "${{ secrets.L2DPET_CSM_SDK_URL }}"
+          unzip -q /tmp/cubism.zip -d "$HOME/l2d-build/live2d-sdk"
+          rm -f /tmp/cubism.zip
+
+      - name: 构建 + 打包（tar.gz / deb / AppImage，含包内自检）
+        run: bash scripts/linux_build.sh --appimage
+
+      # 打包脚本内部已做：隔离 HOME 安装自检、deb 断链自检、AppImage ELF 依赖与运行自检
+      - name: Ubuntu 24.04 容器实测（libc/SSL 装不进 AppImage 的那类问题）
+        run: bash scripts/test_appimage_ubuntu24.sh dist/linux-x86_64/l2dpet-*-linux-*.AppImage
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: l2dpet-linux-${{ github.sha }}
+          path: |
+            dist/linux-x86_64/*.tar.gz
+            dist/linux-x86_64/*.deb
+            dist/linux-x86_64/*.AppImage
+          if-no-files-found: error
+
+  package-windows:
+    name: 完整打包（Windows：便携目录 + 单文件）
+    if: vars.L2DPET_CSM_SDK == 'on' && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/'))
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      # windows_build.bat 自己会在 %USERPROFILE%\l2d-build\live2d-sdk 下找 CubismSdkForNative-*
+      - name: 准备 Cubism SDK
+        run: |
+          mkdir -p "$USERPROFILE/l2d-build/live2d-sdk"
+          curl -fL --retry 2 -o "$RUNNER_TEMP/cubism.zip" "${{ secrets.L2DPET_CSM_SDK_URL }}"
+          unzip -q "$RUNNER_TEMP/cubism.zip" -d "$USERPROFILE/l2d-build/live2d-sdk"
+
+      - name: 构建 + 打包
+        run: cmd //c scripts\\windows_build.bat
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: l2dpet-windows-${{ github.sha }}
+          path: |
+            dist/windows-x64/**
+            dist/l2dpet-portable-x64.exe
+          if-no-files-found: error
+
+  # macOS 目前没有打包脚本（README 里 macOS 只提供构建支持），所以这个任务只验证
+  # "主程序能编出来 + 能跑一帧"：headless 端口不需要 WindowServer，CI 里跑得起来。
+  # 用的还是仓库自带的 Cubism Core（含 macOS/arm64 静态库）；Framework 需要 SDK。
+  player-macos:
+    name: 主程序编译 + headless 渲染（macOS，需 SDK）
+    if: vars.L2DPET_CSM_SDK == 'on' && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/'))
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 准备 Cubism SDK
+        run: |
+          mkdir -p "$HOME/l2d-build/live2d-sdk"
+          curl -fL --retry 2 -o "$RUNNER_TEMP/cubism.zip" "${{ secrets.L2DPET_CSM_SDK_URL }}"
+          unzip -q "$RUNNER_TEMP/cubism.zip" -d "$HOME/l2d-build/live2d-sdk"
+
+      - name: 构建 l2dtest（macOS 端口）
+        run: bash live2d/build-player.sh host
+
+      - name: headless 渲染冒烟（真实模型 → 真实帧）
+        run: |
+          bin="$HOME/l2d-build/build-host/l2dtest"
+          frames=$(mktemp -d)
+          runhome=$(mktemp -d)
+          HOME="$runhome" "$bin" live2d/bundled-models/Hiyori/Hiyori.model3.json \
+            1 0.0333 --port headless --render "$frames" --render-every 1
+          test -n "$(find "$frames" -name '*.ppm' -print -quit)" \
+            || { echo '播放器退出但没产出任何帧' >&2; exit 1; }
+          echo "渲染帧：$(find "$frames" -name '*.ppm' | wc -l) 张"
