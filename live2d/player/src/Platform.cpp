@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cerrno>
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -109,6 +110,29 @@ static std::string Utf8FromWide(const wchar_t* w)
 
 namespace plat
 {
+
+void SleepUntil(const struct timespec& deadline)
+{
+#if defined(__APPLE__)
+    // Darwin 没有 clock_nanosleep；每次中断后重新计算距截止时间的间隔。
+    for (;;)
+    {
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        long long ns = (static_cast<long long>(deadline.tv_sec) - now.tv_sec) * 1000000000LL
+                     + deadline.tv_nsec - now.tv_nsec;
+        if (ns <= 0) return;
+        struct timespec remaining = {static_cast<time_t>(ns / 1000000000LL),
+                                     static_cast<long>(ns % 1000000000LL)};
+        if (nanosleep(&remaining, NULL) == 0 || errno != EINTR) return;
+    }
+#else
+    int result;
+    do { result = clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &deadline, NULL); }
+    while (result == EINTR);
+#endif
+}
+
 
 double MonoNow()
 {

@@ -7,6 +7,7 @@
  */
 
 #include "Port.hpp"
+#include "Platform.h"
 #include "l2d_config.h"
 
 #include <cstddef> // NULL（stub 分支亦需要）
@@ -208,7 +209,7 @@ public:
             _nextFrame.tv_nsec -= 1000000000L;
             _nextFrame.tv_sec += 1;
         }
-        clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &_nextFrame, NULL);
+        plat::SleepUntil(_nextFrame);
     }
 
     bool ShouldQuit() override { return _quit; }

@@ -92,7 +92,8 @@ build() {
         args+=(-DCMAKE_TOOLCHAIN_FILE="$toolchain")
     fi
     cmake "${args[@]}"
-    cmake --build "$bdir" --parallel "${L2D_JOBS:-$(nproc)}"
+    local jobs=${L2D_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)}
+    cmake --build "$bdir" --parallel "$jobs"
     echo "[ok] $bdir/l2dtest"
 }
 

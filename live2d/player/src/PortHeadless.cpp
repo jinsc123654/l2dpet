@@ -62,7 +62,7 @@ public:
             _nextFrame.tv_nsec -= 1000000000L;
             _nextFrame.tv_sec += 1;
         }
-        clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &_nextFrame, NULL);
+        plat::SleepUntil(_nextFrame);
     }
 
 private:

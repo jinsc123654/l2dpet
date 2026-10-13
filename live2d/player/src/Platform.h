@@ -29,6 +29,9 @@ namespace plat
 /** 单调时钟（秒，双精度；Linux clock_gettime / Win QueryPerformanceCounter / Mac mach_absolute_time）。 */
 double MonoNow();
 
+/** 等待单调时钟的绝对截止时间（用于帧率控制）。 */
+void SleepUntil(const struct timespec& deadline);
+
 /** 睡眠（毫秒）。 */
 void SleepMs(int ms);
 
