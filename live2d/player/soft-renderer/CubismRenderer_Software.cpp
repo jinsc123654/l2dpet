@@ -60,6 +60,7 @@
 // ---------------------------------------------------------------------------
 // 平台垫片：线程池原语 + 单调时钟 + 核数
 //   POSIX（Linux 主机 / 板卡）：pthread + pthread_barrier + sched_yield
+//   Apple（macOS/iOS）        ：pthread + mutex/condvar 世代屏障 + sched_yield
 //   Win32（Windows 三端）      ：CreateThread + SYNCHRONIZATION_BARRIER + SwitchToThread
 // 语义对齐：屏障计数都含调用者自己（pthread_barrier 与 Win32 屏障同义）。
 // ---------------------------------------------------------------------------
@@ -110,8 +111,7 @@ static double L2dMonotonicNow()
 
 #else
 
-typedef pthread_t         L2dThread;
-typedef pthread_barrier_t L2dBarrier;
+typedef pthread_t L2dThread;
 
 static int L2dThreadCreate(L2dThread* t, void* (*fn)(void*), void* arg)
 {
@@ -120,9 +120,69 @@ static int L2dThreadCreate(L2dThread* t, void* (*fn)(void*), void* arg)
 
 static void L2dThreadJoin(L2dThread t) { pthread_join(t, NULL); }
 
+#if defined(__APPLE__)
+
+// Apple 平台（Darwin/macOS/iOS）不提供 pthread_barrier_t（POSIX 可选组件），
+// 故用 mutex + condvar 实现**可复用**的世代（generation）屏障，语义对齐
+// pthread_barrier：凑齐 count 个到达者即整体放行，并自动复位供下一代复用。
+// 本池对同一屏障每帧反复调用 Wait（start/done 各一次），必须可复用；
+// 单次性屏障会在第二帧死锁。generation 代号用于规避虚假唤醒与计数的
+// ABA 歧义：等待者只认"代号已变"这一放行条件。
+typedef struct
+{
+    pthread_mutex_t mutex;
+    pthread_cond_t  cond;
+    int             count;       // 每代参与者总数（含调用者）
+    int             arrived;     // 本代已到达数
+    unsigned        generation;  // 代号：每满一代 +1，等待者据此判断放行
+} L2dBarrier;
+
+static void L2dBarrierInit(L2dBarrier* b, int count)
+{
+    b->count = count;
+    b->arrived = 0;
+    b->generation = 0;
+    pthread_mutex_init(&b->mutex, NULL);
+    pthread_cond_init(&b->cond, NULL);
+}
+
+static void L2dBarrierWait(L2dBarrier* b)
+{
+    pthread_mutex_lock(&b->mutex);
+    const unsigned gen = b->generation;
+    if (++b->arrived >= b->count)
+    {
+        // 最后一个到达者：开启下一代并唤醒全部等待者（自己直接返回）
+        b->arrived = 0;
+        ++b->generation;
+        pthread_cond_broadcast(&b->cond);
+    }
+    else
+    {
+        // 谓语循环：仅当代号推进（本代已满）才放行
+        while (gen == b->generation)
+        {
+            pthread_cond_wait(&b->cond, &b->mutex);
+        }
+    }
+    pthread_mutex_unlock(&b->mutex);
+}
+
+static void L2dBarrierDestroy(L2dBarrier* b)
+{
+    pthread_cond_destroy(&b->cond);
+    pthread_mutex_destroy(&b->mutex);
+}
+
+#else
+
+typedef pthread_barrier_t L2dBarrier;
+
 static void L2dBarrierInit(L2dBarrier* b, int count) { pthread_barrier_init(b, NULL, (unsigned)count); }
 static void L2dBarrierWait(L2dBarrier* b) { pthread_barrier_wait(b); }
 static void L2dBarrierDestroy(L2dBarrier* b) { pthread_barrier_destroy(b); }
+
+#endif
 
 static void L2dYield() { sched_yield(); }
 
